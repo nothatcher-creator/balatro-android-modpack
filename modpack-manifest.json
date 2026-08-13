@@ -11,12 +11,30 @@
     "love": "11.5.0",
     "lovely": "0.8.0-static"
   },
+  "upstream_base": {
+    "name": "balatromod",
+    "repository": "mininxd/balatromod",
+    "url": "https://github.com/mininxd/balatromod",
+    "branch": "main",
+    "exact_commit_used_by_apk": null,
+    "description": "Balatro modpack for mobile",
+    "license_declared_on_repository": null
+  },
+  "base_bundled_components": [
+    {"name":"Sandbox Mode","type":"base feature","version":"upstream snapshot"},
+    {"name":"Talisman","type":"bundled mod","version":"2.7 referenced by upstream README","upstream":"SpectralPack/Talisman"},
+    {"name":"JokerDisplay","type":"bundled mod","version":"upstream snapshot","upstream":"nh6574/JokerDisplay"},
+    {"name":"Always Show Seed","type":"bundled mod","version":"upstream snapshot"},
+    {"name":"Zodiac Cards","type":"bundled/custom content","version":"upstream snapshot"},
+    {"name":"Hyperinflation Tag","type":"custom content","version":"upstream snapshot"},
+    {"name":"Custom Jokers","type":"custom content","version":"upstream snapshot","entries":["Aura Farming","Rugpull","Zombie Joker","Lithograph","Boilerplate","Crossing Wires","President Joker"]}
+  ],
   "materializer_version": "2026-08-12-materialized-v10-crash-report-batchfix",
   "mods": [
-    {"name":"Balatro+","id":"balatro_plus","version":"1.0.2-a","author":"SomeCoder99"},
-    {"name":"Bunco","id":"Bunco","version":"5.1","author":"Firch, RENREN, Peas, minichibis, J.D., Guwahavel, Ciirulean, ejwu"},
-    {"name":"Mika's Mod Collection","id":"MikasMods","version":"snapshot in final APK","author":"Mikadoe"},
-    {"name":"Reroll Packs","id":"RerollPacks","version":"1.0.1-android-compat","author":"DorkDad141"}
+    {"name":"Balatro+","id":"balatro_plus","version":"1.0.2-a","author":"SomeCoder99","layer":"added on top of mininxd/balatromod"},
+    {"name":"Bunco","id":"Bunco","version":"5.1","author":"Firch, RENREN, Peas, minichibis, J.D., Guwahavel, Ciirulean, ejwu","layer":"added on top of mininxd/balatromod"},
+    {"name":"Mika's Mod Collection","id":"MikasMods","version":"snapshot in final APK","author":"Mikadoe","layer":"added on top of mininxd/balatromod"},
+    {"name":"Reroll Packs","id":"RerollPacks","version":"1.0.1-android-compat","author":"DorkDad141","layer":"added on top of mininxd/balatromod"}
   ],
   "contains_base_game": false,
   "public_repo_vendors_third_party_mods": false
