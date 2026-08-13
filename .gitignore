@@ -1,0 +1,24 @@
+# Never commit the paid/base game or rebuilt binaries
+*.apk
+*.aab
+*.obb
+*.keystore
+*.jks
+*.p12
+*.pem
+*.key
+
+# Font binaries are not vendored here
+*.ttf
+*.otf
+
+# Build/temp
+build/
+dist/
+.tmp/
+__pycache__/
+*.pyc
+
+# Local test dumps
+crash*.txt
+logcat*.txt
