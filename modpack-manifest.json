@@ -1,0 +1,23 @@
+{
+  "repository": "balatro-android-modpack",
+  "snapshot_date": "2026-08-12",
+  "source_apk_name": "balatro-v0.7-plus-modpack-all-reported-issues-fix.apk",
+  "source_apk_sha256": "118eb6650ddff0cf187487bb45471587a65bd0a245e0530aa2d31552a7adb1af",
+  "source_apk_size_bytes": 77717587,
+  "target": {
+    "platform": "Android",
+    "balatro": "1.0.1o-FULL [M]",
+    "steamodded": "1.0.0~BETA-1224a",
+    "love": "11.5.0",
+    "lovely": "0.8.0-static"
+  },
+  "materializer_version": "2026-08-12-materialized-v10-crash-report-batchfix",
+  "mods": [
+    {"name":"Balatro+","id":"balatro_plus","version":"1.0.2-a","author":"SomeCoder99"},
+    {"name":"Bunco","id":"Bunco","version":"5.1","author":"Firch, RENREN, Peas, minichibis, J.D., Guwahavel, Ciirulean, ejwu"},
+    {"name":"Mika's Mod Collection","id":"MikasMods","version":"snapshot in final APK","author":"Mikadoe"},
+    {"name":"Reroll Packs","id":"RerollPacks","version":"1.0.1-android-compat","author":"DorkDad141"}
+  ],
+  "contains_base_game": false,
+  "public_repo_vendors_third_party_mods": false
+}
