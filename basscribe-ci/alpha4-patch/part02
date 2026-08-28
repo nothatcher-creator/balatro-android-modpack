@@ -1,0 +1,122 @@
+ime<=b) {
++        sum+=f.note[k]; mx=std::max(mx,f.note[k]); n++;
++    }
++    return n ? 0.62f*(sum/float(n))+0.38f*mx : 0.f;
++}
++
++std::pair<float,float> event_contour(const std::vector<FramePred>& fr, const NoteEvent& e) {
++    std::vector<float> vals; float conf=0.f; int n=0;
++    const double a=e.time-0.035, b=e.time+e.duration+0.035;
++    for (auto& f:fr) if (f.time>=a && f.time<=b && f.contourConf>=0.10f) {
++        vals.push_back(f.contourMidi); conf+=f.contourConf; n++;
++    }
++    if (vals.empty()) return {0.f,0.f};
++    std::sort(vals.begin(),vals.end());
++    return {vals[vals.size()/2],conf/float(std::max(1,n))};
++}
++
++void refine_fundamentals(std::vector<NoteEvent>& notes, const std::vector<FramePred>& fr, const std::vector<float>& audio) {
++    if (notes.empty()) return;
++    std::vector<std::vector<int>> cand(notes.size());
++    std::vector<std::vector<double>> emit(notes.size());
++    for (size_t i=0;i<notes.size();i++) {
++        auto [cm,cc]=event_contour(fr,notes[i]);
++        std::vector<int> v;
++        auto add=[&](int m){ if (m>=MIDI_MIN && m<=MIDI_MAX && std::find(v.begin(),v.end(),m)==v.end()) v.push_back(m); };
++        const int m=notes[i].midi;
++        add(m); add(m-12); add(m+12); add(m-2); add(m-1); add(m+1); add(m+2);
++        if (cc>0.10f) { int c=int(std::lround(cm)); add(c); add(c-1); add(c+1); add(c-12); }
++        std::sort(v.begin(),v.end()); cand[i]=v;
++        for (int c:v) {
++            const float bp=bp_event_probability(fr,notes[i],c);
++            const float hs=harmonic_fundamental_score(audio,notes[i],c);
++            double score=2.05*std::log(double(bp)+0.025)+1.12*double(hs);
++            if (cc>0.10f) {
++                const float d=std::abs(float(c)-cm);
++                const float cw=std::clamp((cc-0.10f)/0.38f,0.f,1.f);
++                score+=1.05*cw*std::exp(-0.5*double(d*d)/(0.72*0.72));
++                if (std::abs(d-12.f)<1.1f) score-=0.92*cw;
++                else if (d>3.f) score-=0.07*cw*std::min(d-3.f,8.f);
++            }
++            if (c==m) score+=0.10; // don't change pitch without real evidence
++            if (c>62 && bp<0.42f) score-=0.08*(c-62);
++            emit[i].push_back(score);
++        }
++    }
++
++    std::vector<std::vector<double>> dp(notes.size());
++    std::vector<std::vector<int>> back(notes.size());
++    for (size_t i=0;i<notes.size();i++) {
++        dp[i].assign(cand[i].size(),-1e30); back[i].assign(cand[i].size(),-1);
++        for (size_t j=0;j<cand[i].size();j++) {
++            if (i==0) { dp[i][j]=emit[i][j]; continue; }
++            for (size_t k=0;k<cand[i-1].size();k++) {
++                const int d=std::abs(cand[i][j]-cand[i-1][k]);
++                double tr=-0.055*double(d);
++                if (d>7) tr-=0.26+0.035*double(d-7);
++                // Fresh attacks can legitimately jump; weak onsets should not
++                // cause octave hopping just because a harmonic briefly wins.
++                const double attack=std::clamp(double(notes[i].onset),0.0,1.0);
++                tr*=1.0-0.42*attack;
++                const double q=dp[i-1][k]+tr+emit[i][j];
++                if (q>dp[i][j]) { dp[i][j]=q; back[i][j]=int(k); }
++            }
++        }
++    }
++    int j=int(std::max_element(dp.back().begin(),dp.back().end())-dp.back().begin());
++    for (size_t ri=notes.size();ri-->0;) {
++        const int old=notes[ri].midi, neu=cand[ri][size_t(j)];
++        if (neu!=old) {
++            notes[ri].midi=neu;
++            notes[ri].confidence=std::clamp(notes[ri].confidence*0.92f+0.04f,0.f,1.f);
++        }
++        if (ri>0) { j=back[ri][size_t(j)]; if (j<0) j=0; }
++    }
++}
++
++void consolidate_events(std::vector<NoteEvent>& notes) {
++    if (notes.size()<2) return;
++    // Remove tiny weak islands after pitch correction, then merge continuation
++    // fragments that do not have evidence of a new pluck.
++    for (size_t i=1;i+1<notes.size();) {
++        auto& a=notes[i-1]; auto& b=notes[i]; auto& c=notes[i+1];
++        const bool island=b.duration<0.115 && b.onset<0.36f && b.confidence<0.55f &&
++            std::abs(a.midi-c.midi)<=1 && std::abs(b.midi-a.midi)>=2 && std::abs(b.midi-c.midi)>=2;
++        if (island) { a.duration=std::max(a.duration,(c.time+c.duration)-a.time); notes.erase(notes.begin()+ptrdiff_t(i)); continue; }
++        i++;
++    }
++    std::vector<NoteEvent> out; out.reserve(notes.size());
++    for (auto n:notes) {
++        if (!out.empty()) {
++            auto& p=out.back();
++            const double gap=n.time-(p.time+p.duration);
++            if (n.midi==p.midi && gap<=0.075 && n.onset<0.50f) {
++                p.duration=std::max(p.duration,(n.time+n.duration)-p.time);
++                p.confidence=std::max(p.confidence,n.confidence);
++                p.onset=std::max(p.onset,n.onset);
++                continue;
++            }
++            // One-semitone low-onset flutter over <100 ms is normally vibrato
++            // / estimator wobble, not a newly fretted note.
++            if (std::abs(n.midi-p.midi)==1 && n.duration<0.10 && n.onset<0.24f && gap<0.04) {
++                p.duration=std::max(p.duration,(n.time+n.duration)-p.time);
++                p.confidence=std::max(p.confidence,n.confidence*0.95f);
++                continue;
++            }
++        }
++        out.push_back(n);
++    }
++    notes.swap(out);
++}
++
++void infer_articulations(std::vector<NoteEvent>& out, const std::vector<FramePred>& fr) {
++    for (auto& n:out) n.art="pluck";
++    for (size_t n=1;n<out.size();n++) {
++        auto& p=out[n-1]; auto& x=out[n]; const int d=x.midi-p.midi;
++        const double gap=x.time-(p.time+p.duration);
++        if (d==0 || gap>0.16 || gap<-0.10) continue;
++        const double t0=std::max(p.time,p.time+p.duration-0.18), t1=x.time+0.18;
++        std::vector<float> c;
++        for (auto& f:fr) if (f.time>=t0 && f.time<=t1 && f.contourConf>=0.10f) c.push_back(f.contourMidi);
++        bool slide=false; float span=0.f; float monotonicRatio=0.f;
++        if (c.size()>=4 && s
