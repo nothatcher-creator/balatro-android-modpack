@@ -1,0 +1,45 @@
+ set_stage("Writing neural bass events...",0.97f);
+-        write_csv(out,notes);
++        write_csv(out,notes,grid);
+         set_stage("Neural transcription complete",1.f);
+         g_state=2;
+     } catch (const Ort::Exception& e) { set_error(std::string("ONNX Runtime: ")+e.what()); }
+@@ -426,7 +717,7 @@
+ } // namespace
+ 
+ extern "C" {
+-__attribute__((visibility("default"))) const char* basscribe_ai_version(void) { return "0.5.0-ai-alpha2/ort"; }
++__attribute__((visibility("default"))) const char* basscribe_ai_version(void) { return "0.5.0-ai-alpha4/ort"; }
+ __attribute__((visibility("default"))) int basscribe_ai_state(void) { return g_state.load(); }
+ __attribute__((visibility("default"))) float basscribe_ai_progress(void) { return g_progress.load(); }
+ __attribute__((visibility("default"))) const char* basscribe_ai_stage(void) {
+--- a/build_android.sh
++++ b/build_android.sh
+@@ -77,8 +77,8 @@
+     elif line.startswith('#app.name=') or line.startswith('app.name='): lines.append('app.name=Basscribe')
+     elif line.startswith('app.application_id='): lines.append('app.application_id=com.brad.basscrib7')
+     elif line.startswith('app.orientation='): lines.append('app.orientation=portrait')
+-    elif line.startswith('app.version_code='): lines.append('app.version_code=52')
+-    elif line.startswith('app.version_name='): lines.append('app.version_name=0.5.0-ai-alpha3')
++    elif line.startswith('app.version_code='): lines.append('app.version_code=53')
++    elif line.startswith('app.version_name='): lines.append('app.version_name=0.5.0-ai-alpha4')
+     else: lines.append(line)
+ p.write_text('\n'.join(lines)+'\n')
+ 
+@@ -100,12 +100,12 @@
+ APK="$(find "$LOVE/app/build/outputs/apk" -type f -name '*embed*noRecord*debug*.apk' | head -1)"
+ [[ -n "$APK" && -f "$APK" ]] || { echo "APK output not found" >&2; exit 2; }
+ mkdir -p "$ROOT/dist"
+-cp "$APK" "$ROOT/dist/Basscribe-v0.5.0-ai-alpha3-arm64.apk"
++cp "$APK" "$ROOT/dist/Basscribe-v0.5.0-ai-alpha4-arm64.apk"
+ 
+ echo "[8/8] Verifying neural payload..."
+-unzip -l "$ROOT/dist/Basscribe-v0.5.0-ai-alpha3-arm64.apk" | grep -E 'libbasscribe_ai.so|libonnxruntime.so|game.love'
++unzip -l "$ROOT/dist/Basscribe-v0.5.0-ai-alpha4-arm64.apk" | grep -E 'libbasscribe_ai.so|libonnxruntime.so|game.love'
+ # Verify the inner game archive really contains both models and the new Lua bridge.
+-unzip -p "$ROOT/dist/Basscribe-v0.5.0-ai-alpha3-arm64.apk" assets/game.love > "$BUILD/verify-game.love"
++unzip -p "$ROOT/dist/Basscribe-v0.5.0-ai-alpha4-arm64.apk" assets/game.love > "$BUILD/verify-game.love"
+ unzip -l "$BUILD/verify-game.love" | grep -E 'models/htdemucs_ft_bass_fp16weights.onnx|models/basic_pitch_nmp.onnx|main.lua'
+ 
+-echo "Built: $ROOT/dist/Basscribe-v0.5.0-ai-alpha3-arm64.apk"
++echo "Built: $ROOT/dist/Basscribe-v0.5.0-ai-alpha4-arm64.apk"
