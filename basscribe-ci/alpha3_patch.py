@@ -104,7 +104,6 @@ s=s.replace('app.version_name=0.5.0-ai-alpha2','app.version_name=0.5.0-ai-alpha3
 s=s.replace('Basscribe-v0.5.0-ai-alpha2-arm64.apk','Basscribe-v0.5.0-ai-alpha3-arm64.apk')
 p.write_text(s)
 
-p=root/'.github/workflows/build-basscribe-v05.yml'; p.write_text(p.read_text().replace('alpha2','alpha3'))
 p=root/'CHANGELOG.md'; p.write_text('''# Basscribe v0.5.0-ai-alpha3\n\n- Fixed first-run Android model extraction: neural model files are now copied through LÖVE filesystem storage instead of raw `io.open()`.\n- Added an explicit `ai-runtime/` save directory and verified model-copy size before native inference starts.\n- Moved temporary analysis WAV/CSV files into the same initialized runtime directory.\n- Improves model-copy errors so a storage failure reports the actual failing stage instead of a generic analysis failure.\n\n'''+p.read_text())
 p=root/'IMPLEMENTATION_STATUS.md'; p.write_text(p.read_text().replace('Implemented in this package:', 'Implemented in this package:\n\n- alpha3 Android first-run save-directory/model extraction fix'))
 
