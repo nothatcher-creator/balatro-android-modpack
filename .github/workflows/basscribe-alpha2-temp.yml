@@ -1,0 +1,55 @@
+name: Basscribe alpha2 temporary build
+
+on:
+  push:
+    branches:
+      - basscribe-v05-build-alpha2
+    paths:
+      - 'basscribe-ci/mini/**'
+      - '.github/workflows/basscribe-alpha2-temp.yml'
+  workflow_dispatch:
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout build branch
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Reconstruct verified Basscribe source
+        shell: bash
+        run: |
+          cat basscribe-ci/mini/part* | base64 -d > /tmp/Basscribe-v0.5.0-ai-alpha2-ci-source.zip
+          echo 'e116e72e4f17082646403f182e43ad6f984d767a9e0de8ff14b18e8d36f0a357  /tmp/Basscribe-v0.5.0-ai-alpha2-ci-source.zip' | sha256sum -c -
+          mkdir -p /tmp/basscribe
+          unzip -q /tmp/Basscribe-v0.5.0-ai-alpha2-ci-source.zip -d /tmp/basscribe
+
+      - name: Build Basscribe v0.5 neural APK
+        shell: bash
+        run: |
+          cd /tmp/basscribe/Basscribe-v0.5-source
+          chmod +x build_android.sh
+          ./build_android.sh
+
+      - name: Stage APK
+        shell: bash
+        run: |
+          cp /tmp/basscribe/Basscribe-v0.5-source/dist/Basscribe-v0.5.0-ai-alpha2-arm64.apk ./Basscribe-v0.5.0-ai-alpha2-arm64.apk
+          sha256sum ./Basscribe-v0.5.0-ai-alpha2-arm64.apk | tee ./Basscribe-v0.5.0-ai-alpha2-arm64.apk.sha256
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Basscribe-v0.5.0-ai-alpha2-arm64
+          path: |
+            Basscribe-v0.5.0-ai-alpha2-arm64.apk
+            Basscribe-v0.5.0-ai-alpha2-arm64.apk.sha256
+          if-no-files-found: error
+          retention-days: 7
