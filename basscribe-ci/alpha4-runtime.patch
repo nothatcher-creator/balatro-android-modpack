@@ -1,0 +1,518 @@
+--- a/game/main.lua
++++ b/game/main.lua
+@@ -1,5 +1,5 @@
+ local APP_NAME = "Basscribe"
+-local VERSION = "0.5.0-ai-alpha3"
++local VERSION = "0.5.0-ai-alpha4"
+ 
+ local state = {
+     status = "Choose a song to generate a bass tab.",
+@@ -9,6 +9,7 @@
+     trackTitle = nil,
+     trackArtist = nil,
+     tempoConfidence = 0,
++    beatGridOffset = 0,
+     progress = 0,
+     processing = false,
+     notes = {},
+@@ -302,8 +303,18 @@
+             local opts = allPositions(notes[i].midi)
+             if #opts == 0 then opts = {{string=1, fret=clamp(notes[i].midi-28,0,24)}} end
+             dp[i], back[i] = {}, {}
++            local hasMidPosition=false
++            for _,alt in ipairs(opts) do
++                if alt.fret>=5 and alt.fret<=12 then hasMidPosition=true break end
++            end
+             for oi,p in ipairs(opts) do
+-                local base = math.abs(p.fret-7) * 0.075
++                local base = math.abs(p.fret-7) * 0.11
++                -- Prefer the normal mid-neck spelling when the exact same pitch
++                -- can be played there. This prevents equivalent-pitch tab errors
++                -- such as D-string 3 replacing A-string 8.
++                if hasMidPosition and p.fret>0 and p.fret<5 then
++                    base = base + 1.55 + (5-p.fret)*0.22
++                end
+                 if p.fret == 0 then base = base + 0.95 end
+                 if p.fret > 12 then base = base + (p.fret-12)*0.30 + 0.85 end
+                 if p.fret > 17 then base = base + (p.fret-17)*0.7 end
+@@ -1303,16 +1314,24 @@
+ end
+ 
+ local function quantizeDisplayTimes(notes)
+-    if #notes == 0 or state.measureDuration <= 0 then return end
+-    local step = state.measureDuration / 16 -- sixteenth-note visual grid
+-    local lastSlot = -999
++    if #notes == 0 or state.bpm <= 0 then return end
++    local beat=60/state.bpm
++    local offset=state.beatGridOffset or 0
++    -- Snap only when genuinely close to a straight-sixteenth or triplet grid.
++    -- Alpha3 forced every attack to a unique sixteenth slot globally, which
++    -- shifted later notes and made correct raw timing look wrong on screen.
+     for _,n in ipairs(notes) do
+-        local slot = math.floor((n.time / step) + 0.5)
+-        -- Keep separate attacks visually distinct when the detector puts two
+-        -- events into the same grid slot.
+-        if slot <= lastSlot and n.time > 0 then slot = lastSlot + 1 end
+-        n.displayTime = slot * step
+-        lastSlot = slot
++        local best=n.time
++        local bestErr=math.huge
++        for _,div in ipairs({4,3}) do
++            local step=beat/div
++            local slot=math.floor(((n.time-offset)/step)+0.5)
++            local q=offset+slot*step
++            local err=math.abs(q-n.time)
++            if err<bestErr then bestErr=err; best=q end
++        end
++        local snapLimit=math.min(0.065,beat*0.12)
++        n.displayTime=(bestErr<=snapLimit) and math.max(0,best) or n.time
+     end
+ end
+ 
+@@ -1478,8 +1497,12 @@
+     local data,err=love.filesystem.read(relPath)
+     if not data then error("Neural result file could not be read: "..tostring(err or "")) end
+     local notes={}
++    local neuralBpm,gridOffset,tempoConfidence=nil,0,0
+     for line in data:gmatch("[^\r\n]+") do
+-        if line:sub(1,1)~="#" and not line:match("^time,") then
++        if line:match("^# bpm=") then neuralBpm=tonumber(line:match("=([%d%.%-]+)"))
++        elseif line:match("^# grid_offset=") then gridOffset=tonumber(line:match("=([%d%.%-]+)")) or 0
++        elseif line:match("^# tempo_confidence=") then tempoConfidence=tonumber(line:match("=([%d%.%-]+)")) or 0
++        elseif line:sub(1,1)~="#" and not line:match("^time,") then
+             local t,d,m,c,on,cs,ce,art=line:match("^([^,]+),([^,]+),([^,]+),([^,]+),([^,]+),([^,]+),([^,]+),([^,]*)")
+             if t and m then
+                 local midi=tonumber(m)
+@@ -1501,7 +1524,7 @@
+         end
+     end
+     table.sort(notes,function(a,b) return a.time<b.time end)
+-    return notes
++    return notes,neuralBpm,gridOffset,tempoConfidence
+ end
+ 
+ local function beginAnalysis(path)
+@@ -1549,10 +1572,13 @@
+         end
+ 
+         state.status="Optimizing bass fingering..."
+-        state.detail="Monophonic continuity + realistic E-A-D-G positions"
++        state.detail="Fundamental-corrected pitch path + realistic E-A-D-G positions"
+         coroutine.yield()
+-        local notes=parseAIResults(resultRel)
+-        state.bpm=estimateTempo(notes,nil)
++        local notes,neuralBpm,gridOffset,tempoConf=parseAIResults(resultRel)
++        if #notes==0 then error("The neural engine found no stable bass notes in this track.") end
++        state.bpm=(neuralBpm and neuralBpm>=70 and neuralBpm<=220) and math.floor(neuralBpm+0.5) or estimateTempo(notes,nil)
++        state.tempoConfidence=tempoConf or 0
++        state.beatGridOffset=gridOffset or 0
+         state.measureDuration=240/state.bpm
+         layoutPositions(notes)
+         applyArticulations(notes)
+@@ -1860,6 +1886,13 @@
+     end
+ 
+     local drawn={}
++    local measureNoteCount=0
++    for _,note in ipairs(state.notes) do
++        local nt=note.displayTime or note.time
++        if nt>=startT and nt<endT then measureNoteCount=measureNoteCount+1 end
++    end
++    local fretFont=(measureNoteCount>=11) and fonts.small or fonts.fret
++    local lastDrawX={}
+     for idx,note in ipairs(state.notes) do
+         local nt=note.displayTime or note.time
+         if nt>=startT and nt<endT then
+@@ -1867,13 +1900,17 @@
+             local nx=staffX+staffW*frac
+             local ny=noteYForString(staffY,note.string or 1,lineGap)
+             local txt=tostring(note.fret or 0)
+-            love.graphics.setFont(fonts.fret)
+-            local tw=fonts.fret:getWidth(txt)
++            love.graphics.setFont(fretFont)
++            local tw=fretFont:getWidth(txt)
++            local si=note.string or 1
++            if lastDrawX[si] and nx-lastDrawX[si] < tw+5 then nx=lastDrawX[si]+tw+5 end
++            nx=math.min(nx,staffR-tw/2-2)
++            lastDrawX[si]=nx
+             local active=current and math.abs((note.time or nt)-playTime)<math.max(0.13,note.duration or 0.13)
+             setColor(17,22,28)
+-            roundedRect(nx-tw/2-4,ny-fonts.fret:getHeight()/2-1,tw+8,fonts.fret:getHeight()+2,3,"fill")
++            roundedRect(nx-tw/2-4,ny-fretFont:getHeight()/2-1,tw+8,fretFont:getHeight()+2,3,"fill")
+             if active then setColor(46,220,111) else setColor(239,242,244) end
+-            love.graphics.print(txt,nx-tw/2,ny-fonts.fret:getHeight()/2-2)
++            love.graphics.print(txt,nx-tw/2,ny-fretFont:getHeight()/2-2)
+             drawn[idx]={x=nx,y=ny,active=active}
+ 
+             local stemTop=staffY+lineGap*3+10
+--- a/native/basscribe_ai.cpp
++++ b/native/basscribe_ai.cpp
+@@ -301,9 +301,27 @@
+                 emit=1.25*std::log(double(pr)+1e-6);
+             } else {
+                 int k=s-1; float p=fr[t].note[k]; float o=fr[t].onset[k];
+-                emit=1.45*std::log(double(std::clamp(p,0.002f,0.999f)));
+-                if (p<0.07f) emit-=2.4;
+-                emit+=0.32*o;
++                const int midi=MIDI_MIN+k;
++                emit=1.55*std::log(double(std::clamp(p,0.002f,0.999f)));
++                if (p<0.07f) emit-=2.55;
++                emit+=0.34*o;
++
++                // Basic Pitch exposes a continuous 1/3-semitone contour in
++                // addition to note bins.  Alpha3 only used that contour after
++                // transcription for articulations, which let harmonics win the
++                // note Viterbi path.  Use it as independent pitch evidence.
++                if (fr[t].contourConf>=0.10f) {
++                    const float cw=std::clamp((fr[t].contourConf-0.10f)/0.42f,0.f,1.f);
++                    const float dist=std::abs(fr[t].contourMidi-float(midi));
++                    if (dist<0.60f) emit+=0.92*cw;
++                    else if (dist<1.25f) emit+=0.38*cw;
++                    else if (std::abs(dist-12.f)<1.15f) emit-=1.10*cw;
++                    else if (dist>3.f) emit-=0.11*cw*std::min(dist-3.f,8.f);
++                }
++                // The top few frets are legal, but bleed/harmonics land there
++                // much more often than a normal bass fundamental. Keep this a
++                // soft prior so real high-register playing still survives.
++                if (midi>62 && p<0.45f) emit-=0.10*float(midi-62);
+             }
+             double best=NEG; int bestp=0;
+             for (int ps=0;ps<S;ps++) {
+@@ -313,9 +331,20 @@
+                 else if (ps>0 && s==0) tr=-0.20;
+                 else {
+                     int d=std::abs((MIDI_MIN+s-1)-(MIDI_MIN+ps-1));
+-                    tr=-(d<=2?0.26*d:(d<=5?0.52*d:1.6+0.24*d));
+-                    tr+=0.72*fr[t].onset[s-1];
+-                    if (d>12) tr-=2.5;
++                    const float onset=fr[t].onset[s-1];
++                    tr=-(d<=2?0.46*d:(d<=5?0.68*d:1.95+0.28*d));
++                    tr+=1.08*onset;
++                    // A legato pitch change can have little/no onset. Allow it
++                    // when the continuous contour is already sitting on the
++                    // destination; otherwise weak-onset semitone chatter pays
++                    // an extra switching cost.
++                    if (fr[t].contourConf>=0.12f) {
++                        const int nm=MIDI_MIN+s-1;
++                        const float cd=std::abs(fr[t].contourMidi-float(nm));
++                        if (cd<0.85f) tr+=0.62*fr[t].contourConf;
++                        else if (onset<0.16f) tr-=0.18;
++                    } else if (onset<0.16f) tr-=0.16;
++                    if (d>12) tr-=2.8;
+                 }
+                 double v=prev[ps]+tr;
+                 if (v>best) { best=v; bestp=ps; }
+@@ -388,10 +417,266 @@
+     return out;
+ }
+ 
+-void write_csv(const std::string& path, const std::vector<NoteEvent>& notes) {
++
++float goertzel_mag(const std::vector<float>& audio, double sec, float freq) {
++    if (audio.empty() || freq<18.f || freq>float(BP_SR)*0.48f) return 0.f;
++    constexpr int N=2048;
++    const int64_t center=int64_t(std::llround(sec*double(BP_SR)));
++    const int64_t start=center-N/2;
++    const float w=2.f*PI*freq/float(BP_SR);
++    const float coeff=2.f*std::cos(w);
++    float s1=0.f,s2=0.f;
++    for (int i=0;i<N;i++) {
++        int64_t j=std::clamp<int64_t>(start+i,0,int64_t(audio.size()-1));
++        const float win=0.5f-0.5f*std::cos(2.f*PI*float(i)/float(N-1));
++        const float s0=audio[size_t(j)]*win+coeff*s1-s2;
++        s2=s1; s1=s0;
++    }
++    float power=s1*s1+s2*s2-coeff*s1*s2;
++    return std::sqrt(std::max(0.f,power))/float(N);
++}
++
++float harmonic_fundamental_score(const std::vector<float>& audio, const NoteEvent& e, int midi) {
++    const float f=440.f*std::pow(2.f,(float(midi)-69.f)/12.f);
++    const double p1=e.time+std::min(0.055,std::max(0.018,e.duration*0.28));
++    const double p2=e.time+std::max(0.025,e.duration*0.62);
++    auto at=[&](double t)->float {
++        const float a1=goertzel_mag(audio,t,f);
++        const float a2=goertzel_mag(audio,t,f*2.f);
++        const float a3=goertzel_mag(audio,t,f*3.f);
++        const float a4=goertzel_mag(audio,t,f*4.f);
++        const float sub=goertzel_mag(audio,t,f*0.5f);
++        auto l=[](float x){ return std::log1p(55.f*x); };
++        return 1.18f*l(a1)+0.56f*l(a2)+0.31f*l(a3)+0.18f*l(a4)-0.88f*l(sub);
++    };
++    return 0.56f*at(p1)+0.44f*at(p2);
++}
++
++float bp_event_probability(const std::vector<FramePred>& fr, const NoteEvent& e, int midi) {
++    if (midi<MIDI_MIN || midi>MIDI_MAX) return 0.f;
++    const int k=midi-MIDI_MIN;
++    float sum=0.f,mx=0.f; int n=0;
++    const double a=e.time-0.025, b=e.time+e.duration+0.025;
++    for (auto& f:fr) if (f.time>=a && f.time<=b) {
++        sum+=f.note[k]; mx=std::max(mx,f.note[k]); n++;
++    }
++    return n ? 0.62f*(sum/float(n))+0.38f*mx : 0.f;
++}
++
++std::pair<float,float> event_contour(const std::vector<FramePred>& fr, const NoteEvent& e) {
++    std::vector<float> vals; float conf=0.f; int n=0;
++    const double a=e.time-0.035, b=e.time+e.duration+0.035;
++    for (auto& f:fr) if (f.time>=a && f.time<=b && f.contourConf>=0.10f) {
++        vals.push_back(f.contourMidi); conf+=f.contourConf; n++;
++    }
++    if (vals.empty()) return {0.f,0.f};
++    std::sort(vals.begin(),vals.end());
++    return {vals[vals.size()/2],conf/float(std::max(1,n))};
++}
++
++void refine_fundamentals(std::vector<NoteEvent>& notes, const std::vector<FramePred>& fr, const std::vector<float>& audio) {
++    if (notes.empty()) return;
++    std::vector<std::vector<int>> cand(notes.size());
++    std::vector<std::vector<double>> emit(notes.size());
++    for (size_t i=0;i<notes.size();i++) {
++        auto [cm,cc]=event_contour(fr,notes[i]);
++        std::vector<int> v;
++        auto add=[&](int m){ if (m>=MIDI_MIN && m<=MIDI_MAX && std::find(v.begin(),v.end(),m)==v.end()) v.push_back(m); };
++        const int m=notes[i].midi;
++        add(m); add(m-12); add(m+12); add(m-2); add(m-1); add(m+1); add(m+2);
++        if (cc>0.10f) { int c=int(std::lround(cm)); add(c); add(c-1); add(c+1); add(c-12); }
++        std::sort(v.begin(),v.end()); cand[i]=v;
++        for (int c:v) {
++            const float bp=bp_event_probability(fr,notes[i],c);
++            const float hs=harmonic_fundamental_score(audio,notes[i],c);
++            double score=2.05*std::log(double(bp)+0.025)+1.12*double(hs);
++            if (cc>0.10f) {
++                const float d=std::abs(float(c)-cm);
++                const float cw=std::clamp((cc-0.10f)/0.38f,0.f,1.f);
++                score+=1.05*cw*std::exp(-0.5*double(d*d)/(0.72*0.72));
++                if (std::abs(d-12.f)<1.1f) score-=0.92*cw;
++                else if (d>3.f) score-=0.07*cw*std::min(d-3.f,8.f);
++            }
++            if (c==m) score+=0.10;
++            if (c>62 && bp<0.42f) score-=0.08*(c-62);
++            emit[i].push_back(score);
++        }
++    }
++
++    std::vector<std::vector<double>> dp(notes.size());
++    std::vector<std::vector<int>> back(notes.size());
++    for (size_t i=0;i<notes.size();i++) {
++        dp[i].assign(cand[i].size(),-1e30); back[i].assign(cand[i].size(),-1);
++        for (size_t j=0;j<cand[i].size();j++) {
++            if (i==0) { dp[i][j]=emit[i][j]; continue; }
++            for (size_t k=0;k<cand[i-1].size();k++) {
++                const int d=std::abs(cand[i][j]-cand[i-1][k]);
++                double tr=-0.055*double(d);
++                if (d>7) tr-=0.26+0.035*double(d-7);
++                const double attack=std::clamp(double(notes[i].onset),0.0,1.0);
++                tr*=1.0-0.42*attack;
++                const double q=dp[i-1][k]+tr+emit[i][j];
++                if (q>dp[i][j]) { dp[i][j]=q; back[i][j]=int(k); }
++            }
++        }
++    }
++    int j=int(std::max_element(dp.back().begin(),dp.back().end())-dp.back().begin());
++    for (size_t ri=notes.size();ri-->0;) {
++        const int old=notes[ri].midi, neu=cand[ri][size_t(j)];
++        if (neu!=old) {
++            notes[ri].midi=neu;
++            notes[ri].confidence=std::clamp(notes[ri].confidence*0.92f+0.04f,0.f,1.f);
++        }
++        if (ri>0) { j=back[ri][size_t(j)]; if (j<0) j=0; }
++    }
++}
++
++void consolidate_events(std::vector<NoteEvent>& notes) {
++    if (notes.size()<2) return;
++    for (size_t i=1;i+1<notes.size();) {
++        auto& a=notes[i-1]; auto& b=notes[i]; auto& c=notes[i+1];
++        const bool island=b.duration<0.115 && b.onset<0.36f && b.confidence<0.55f &&
++            std::abs(a.midi-c.midi)<=1 && std::abs(b.midi-a.midi)>=2 && std::abs(b.midi-c.midi)>=2;
++        if (island) { a.duration=std::max(a.duration,(c.time+c.duration)-a.time); notes.erase(notes.begin()+ptrdiff_t(i)); continue; }
++        i++;
++    }
++    std::vector<NoteEvent> out; out.reserve(notes.size());
++    for (auto n:notes) {
++        if (!out.empty()) {
++            auto& p=out.back();
++            const double gap=n.time-(p.time+p.duration);
++            if (n.midi==p.midi && gap<=0.075 && n.onset<0.50f) {
++                p.duration=std::max(p.duration,(n.time+n.duration)-p.time);
++                p.confidence=std::max(p.confidence,n.confidence);
++                p.onset=std::max(p.onset,n.onset);
++                continue;
++            }
++            if (std::abs(n.midi-p.midi)==1 && n.duration<0.10 && n.onset<0.24f && gap<0.04) {
++                p.duration=std::max(p.duration,(n.time+n.duration)-p.time);
++                p.confidence=std::max(p.confidence,n.confidence*0.95f);
++                continue;
++            }
++        }
++        out.push_back(n);
++    }
++    notes.swap(out);
++}
++
++void infer_articulations(std::vector<NoteEvent>& out, const std::vector<FramePred>& fr) {
++    for (auto& n:out) n.art="pluck";
++    for (size_t n=1;n<out.size();n++) {
++        auto& p=out[n-1]; auto& x=out[n]; const int d=x.midi-p.midi;
++        const double gap=x.time-(p.time+p.duration);
++        if (d==0 || gap>0.16 || gap<-0.10) continue;
++        const double t0=std::max(p.time,p.time+p.duration-0.18), t1=x.time+0.18;
++        std::vector<float> c;
++        for (auto& f:fr) if (f.time>=t0 && f.time<=t1 && f.contourConf>=0.10f) c.push_back(f.contourMidi);
++        bool slide=false; float span=0.f; float monotonicRatio=0.f;
++        if (c.size()>=4 && std::abs(d)>=2) {
++            float lo=*std::min_element(c.begin(),c.end()), hi=*std::max_element(c.begin(),c.end());
++            span=hi-lo; int intermediates=0,monotonic=0;
++            const float plo=float(std::min(p.midi,x.midi)), phi=float(std::max(p.midi,x.midi));
++            for (size_t j=1;j<c.size();j++) {
++                if (c[j]>plo+0.25f && c[j]<phi-0.25f) intermediates++;
++                const float dd=c[j]-c[j-1]; if ((d>0 && dd>=-0.28f)||(d<0 && dd<=0.28f)) monotonic++;
++            }
++            monotonicRatio=float(monotonic)/float(std::max<size_t>(1,c.size()-1));
++            const bool traverses=(intermediates>=2)||(span>=0.58f*float(std::abs(d)));
++            slide=traverses && monotonicRatio>=0.55f;
++        }
++        const bool strongContour=slide && span>=0.72f*float(std::abs(d)) && monotonicRatio>=0.68f;
++        if (slide && x.onset<(strongContour?0.72f:0.58f)) x.art="slide";
++        else if (x.onset<0.40f && std::abs(d)<=5 && x.time-p.time<=0.28) x.art=(d>0?"hammer":"pull");
++    }
++}
++
++struct TempoGrid { float bpm=0.f; float offset=0.f; float confidence=0.f; };
++TempoGrid estimate_tempo_grid(const std::vector<float>& audio, const std::vector<NoteEvent>& notes) {
++    TempoGrid r; if (audio.size()<4096) return r;
++    constexpr int H=256, W=1024;
++    const float rate=float(BP_SR)/float(H);
++    const int nf=int((audio.size()+H-1)/H);
++    std::vector<float> onset(size_t(nf),0.f), sm(size_t(nf),0.f);
++    float prev=0.f;
++    for (int i=0;i<nf;i++) {
++        double e=0.0; int cnt=0; const int center=i*H;
++        for (int k=-W/2;k<W/2;k+=2) {
++            int j=std::clamp(center+k,0,int(audio.size())-1); const float v=audio[size_t(j)]; e+=double(v)*v; cnt++;
++        }
++        const float rms=std::sqrt(float(e/std::max(1,cnt)));
++        const float x=std::log1p(100.f*rms);
++        onset[size_t(i)]=std::max(0.f,x-prev); prev=x;
++    }
++    for (int i=0;i<nf;i++) {
++        sm[size_t(i)]=((i>1?onset[size_t(i-2)]:0.f)+2.f*(i>0?onset[size_t(i-1)]:0.f)+3.f*onset[size_t(i)]+2.f*(i+1<nf?onset[size_t(i+1)]:0.f)+(i+2<nf?onset[size_t(i+2)]:0.f))/9.f;
++    }
++    auto corr=[&](float lag)->float {
++        int l=int(std::floor(lag)); float f=lag-float(l); if (l<2 || l+1>=nf/2) return 0.f;
++        double dot=0,aa=0,bb=0;
++        for (int i=l+2;i<nf;i++) {
++            const float b0=sm[size_t(i-l)], b1=sm[size_t(i-l-1)]; const float b=b0*(1.f-f)+b1*f; const float a=sm[size_t(i)];
++            dot+=double(a)*b; aa+=double(a)*a; bb+=double(b)*b;
++        }
++        return (aa>1e-10&&bb>1e-10)?float(dot/std::sqrt(aa*bb)):0.f;
++    };
++    float best=-1.f,bpm=0.f;
++    const double duration=double(audio.size())/BP_SR;
++    const float density=duration>1.0?float(notes.size()/duration):0.f;
++    for (int b=70;b<=220;b++) {
++        const float lag=rate*60.f/float(b); float sc=corr(lag);
++        if (notes.size()>8) {
++            const double beat=60.0/double(b); double ev=0,wt=0;
++            for (size_t i=1;i<notes.size();i++) {
++                double dt=notes[i].time-notes[i-1].time; if (dt<=0||dt>1.5) continue;
++                double q=dt/beat; double near=std::round(q*4.0)/4.0; double err=std::abs(q-near);
++                double w=0.35+0.65*std::clamp(double(notes[i].onset),0.0,1.0);
++                ev+=w*std::exp(-35.0*err*err); wt+=w;
++            }
++            if (wt>0) sc+=0.18f*float(ev/wt);
++        }
++        if (b>=170 && density<3.25f) sc-=0.035f*float(b-169)/20.f;
++        if (sc>best) { best=sc; bpm=float(b); }
++    }
++    if (bpm<=0) return r;
++    if (bpm>=165.f && bpm*0.5f>=70.f) {
++        const float fast=corr(rate*60.f/bpm), half=corr(rate*60.f/(bpm*0.5f));
++        if (half>=fast*0.73f && density<3.35f) { bpm*=0.5f; best=half; }
++    }
++    const float sixteenth=rate*60.f/bpm/4.f;
++    float bestPhaseScore=-1.f,bestPhase=0.f;
++    const int phaseSteps=24;
++    for (int p=0;p<phaseSteps;p++) {
++        const float phase=sixteenth*float(p)/float(phaseSteps); double sc=0,wt=0;
++        for (int i=0;i<nf;i++) if (sm[size_t(i)]>0.f) {
++            float q=(float(i)-phase)/sixteenth; float d=std::abs(q-std::round(q)); d=std::min(d,1.f-d);
++            float w=sm[size_t(i)]; sc+=w*std::exp(-18.f*d*d); wt+=w;
++        }
++        const float z=wt>0?float(sc/wt):0.f; if (z>bestPhaseScore) { bestPhaseScore=z; bestPhase=phase; }
++    }
++    r.bpm=bpm; r.offset=(bestPhase/rate); r.confidence=std::max(0.f,best);
++    return r;
++}
++
++void write_csv(const std::string& path, const std::vector<NoteEvent>& notes, const TempoGrid& grid) {
+     std::ofstream o(path,std::ios::binary|std::ios::trunc);
+     if (!o) throw std::runtime_error("Could not create neural result file");
+-    o << "# Basscribe neural-events v1\n";
++    o << "# Basscribe neural-events v2\n";
++    o << "# bpm=" << grid.bpm << "\n";
++    o << "# grid_offset=" << grid.offset << "\n";
++    o << "# tempo_confidence=" << grid.confidence << "\n";
+     o << "time,duration,midi,confidence,onset,contour_start,contour_end,articulation\n";
+     char line[256];
+     for (auto& n:notes) {
+@@ -413,10 +698,16 @@
+         auto mono=downsample_22050(bass);
+         bass.clear(); bass.shrink_to_fit();
+         auto frames=run_basic_pitch(mono,basic,threads);
+-        mono.clear(); mono.shrink_to_fit();
+         auto notes=decode_monophonic(frames);
++        set_stage("Correcting bass fundamentals...",0.865f);
++        refine_fundamentals(notes,frames,mono);
++        consolidate_events(notes);
++        infer_articulations(notes,frames);
++        set_stage("Locking tempo and beat grid...",0.94f);
++        auto grid=estimate_tempo_grid(mono,notes);
++        mono.clear(); mono.shrink_to_fit();
+         set_stage("Writing neural bass events...",0.97f);
+-        write_csv(out,notes);
++        write_csv(out,notes,grid);
+         set_stage("Neural transcription complete",1.f);
+         g_state=2;
+     } catch (const Ort::Exception& e) { set_error(std::string("ONNX Runtime: ")+e.what()); }
+@@ -426,7 +717,7 @@
+ } // namespace
+ 
+ extern "C" {
+-__attribute__((visibility("default"))) const char* basscribe_ai_version(void) { return "0.5.0-ai-alpha2/ort"; }
++__attribute__((visibility("default"))) const char* basscribe_ai_version(void) { return "0.5.0-ai-alpha4/ort"; }
+ __attribute__((visibility("default"))) int basscribe_ai_state(void) { return g_state.load(); }
+ __attribute__((visibility("default"))) float basscribe_ai_progress(void) { return g_progress.load(); }
+ __attribute__((visibility("default"))) const char* basscribe_ai_stage(void) {
+--- a/build_android.sh
++++ b/build_android.sh
+@@ -77,8 +77,8 @@
+     elif line.startswith('#app.name=') or line.startswith('app.name='): lines.append('app.name=Basscribe')
+     elif line.startswith('app.application_id='): lines.append('app.application_id=com.brad.basscrib7')
+     elif line.startswith('app.orientation='): lines.append('app.orientation=portrait')
+-    elif line.startswith('app.version_code='): lines.append('app.version_code=52')
+-    elif line.startswith('app.version_name='): lines.append('app.version_name=0.5.0-ai-alpha3')
++    elif line.startswith('app.version_code='): lines.append('app.version_code=53')
++    elif line.startswith('app.version_name='): lines.append('app.version_name=0.5.0-ai-alpha4')
+     else: lines.append(line)
+ p.write_text('\n'.join(lines)+'\n')
+ 
+@@ -100,12 +100,12 @@
+ APK="$(find "$LOVE/app/build/outputs/apk" -type f -name '*embed*noRecord*debug*.apk' | head -1)"
+ [[ -n "$APK" && -f "$APK" ]] || { echo "APK output not found" >&2; exit 2; }
+ mkdir -p "$ROOT/dist"
+-cp "$APK" "$ROOT/dist/Basscribe-v0.5.0-ai-alpha3-arm64.apk"
++cp "$APK" "$ROOT/dist/Basscribe-v0.5.0-ai-alpha4-arm64.apk"
+ 
+ echo "[8/8] Verifying neural payload..."
+-unzip -l "$ROOT/dist/Basscribe-v0.5.0-ai-alpha3-arm64.apk" | grep -E 'libbasscribe_ai.so|libonnxruntime.so|game.love'
++unzip -l "$ROOT/dist/Basscribe-v0.5.0-ai-alpha4-arm64.apk" | grep -E 'libbasscribe_ai.so|libonnxruntime.so|game.love'
+ # Verify the inner game archive really contains both models and the new Lua bridge.
+-unzip -p "$ROOT/dist/Basscribe-v0.5.0-ai-alpha3-arm64.apk" assets/game.love > "$BUILD/verify-game.love"
++unzip -p "$ROOT/dist/Basscribe-v0.5.0-ai-alpha4-arm64.apk" assets/game.love > "$BUILD/verify-game.love"
+ unzip -l "$BUILD/verify-game.love" | grep -E 'models/htdemucs_ft_bass_fp16weights.onnx|models/basic_pitch_nmp.onnx|main.lua'
+ 
+-echo "Built: $ROOT/dist/Basscribe-v0.5.0-ai-alpha3-arm64.apk"
++echo "Built: $ROOT/dist/Basscribe-v0.5.0-ai-alpha4-arm64.apk"
