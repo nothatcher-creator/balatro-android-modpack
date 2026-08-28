@@ -1,0 +1,114 @@
+td::abs(d)>=2) {
++            float lo=*std::min_element(c.begin(),c.end()), hi=*std::max_element(c.begin(),c.end());
++            span=hi-lo; int intermediates=0,monotonic=0;
++            const float plo=float(std::min(p.midi,x.midi)), phi=float(std::max(p.midi,x.midi));
++            for (size_t j=1;j<c.size();j++) {
++                if (c[j]>plo+0.25f && c[j]<phi-0.25f) intermediates++;
++                const float dd=c[j]-c[j-1]; if ((d>0 && dd>=-0.28f)||(d<0 && dd<=0.28f)) monotonic++;
++            }
++            monotonicRatio=float(monotonic)/float(std::max<size_t>(1,c.size()-1));
++            const bool traverses=(intermediates>=2)||(span>=0.58f*float(std::abs(d)));
++            slide=traverses && monotonicRatio>=0.55f;
++        }
++        // A slide can still have a noticeable arrival transient from fret/string
++        // noise. Alpha3's 0.46 cutoff was too strict and missed real slides.
++        const bool strongContour=slide && span>=0.72f*float(std::abs(d)) && monotonicRatio>=0.68f;
++        if (slide && x.onset<(strongContour?0.72f:0.58f)) x.art="slide";
++        else if (x.onset<0.40f && std::abs(d)<=5 && x.time-p.time<=0.28) x.art=(d>0?"hammer":"pull");
++    }
++}
++
++struct TempoGrid { float bpm=0.f; float offset=0.f; float confidence=0.f; };
++TempoGrid estimate_tempo_grid(const std::vector<float>& audio, const std::vector<NoteEvent>& notes) {
++    TempoGrid r; if (audio.size()<4096) return r;
++    constexpr int H=256, W=1024;
++    const float rate=float(BP_SR)/float(H);
++    const int nf=int((audio.size()+H-1)/H);
++    std::vector<float> onset(size_t(nf),0.f), sm(size_t(nf),0.f);
++    float prev=0.f;
++    for (int i=0;i<nf;i++) {
++        double e=0.0; int cnt=0; const int center=i*H;
++        for (int k=-W/2;k<W/2;k+=2) {
++            int j=std::clamp(center+k,0,int(audio.size())-1); const float v=audio[size_t(j)]; e+=double(v)*v; cnt++;
++        }
++        const float rms=std::sqrt(float(e/std::max(1,cnt)));
++        const float x=std::log1p(100.f*rms);
++        onset[size_t(i)]=std::max(0.f,x-prev); prev=x;
++    }
++    for (int i=0;i<nf;i++) {
++        sm[size_t(i)]=((i>1?onset[size_t(i-2)]:0.f)+2.f*(i>0?onset[size_t(i-1)]:0.f)+3.f*onset[size_t(i)]+2.f*(i+1<nf?onset[size_t(i+1)]:0.f)+(i+2<nf?onset[size_t(i+2)]:0.f))/9.f;
++    }
++    auto corr=[&](float lag)->float {
++        int l=int(std::floor(lag)); float f=lag-float(l); if (l<2 || l+1>=nf/2) return 0.f;
++        double dot=0,aa=0,bb=0;
++        for (int i=l+2;i<nf;i++) {
++            const float b0=sm[size_t(i-l)], b1=sm[size_t(i-l-1)]; const float b=b0*(1.f-f)+b1*f; const float a=sm[size_t(i)];
++            dot+=double(a)*b; aa+=double(a)*a; bb+=double(b)*b;
++        }
++        return (aa>1e-10&&bb>1e-10)?float(dot/std::sqrt(aa*bb)):0.f;
++    };
++    float best=-1.f,bpm=0.f;
++    const double duration=double(audio.size())/BP_SR;
++    const float density=duration>1.0?float(notes.size()/duration):0.f;
++    for (int b=70;b<=220;b++) {
++        const float lag=rate*60.f/float(b); float sc=corr(lag);
++        // A soft note-event periodicity term helps distinguish nearby BPMs.
++        if (notes.size()>8) {
++            const double beat=60.0/double(b); double ev=0,wt=0;
++            for (size_t i=1;i<notes.size();i++) {
++                double dt=notes[i].time-notes[i-1].time; if (dt<=0||dt>1.5) continue;
++                double q=dt/beat; double near=std::round(q*4.0)/4.0; double err=std::abs(q-near);
++                double w=0.35+0.65*std::clamp(double(notes[i].onset),0.0,1.0);
++                ev+=w*std::exp(-35.0*err*err); wt+=w;
++            }
++            if (wt>0) sc+=0.18f*float(ev/wt);
++        }
++        if (b>=170 && density<3.25f) sc-=0.035f*float(b-169)/20.f;
++        if (sc>best) { best=sc; bpm=float(b); }
++    }
++    if (bpm<=0) return r;
++    // Explicit metrical-octave guard for eighth-note-driven bass riffs.
++    if (bpm>=165.f && bpm*0.5f>=70.f) {
++        const float fast=corr(rate*60.f/bpm), half=corr(rate*60.f/(bpm*0.5f));
++        if (half>=fast*0.73f && density<3.35f) { bpm*=0.5f; best=half; }
++    }
++    const float sixteenth=rate*60.f/bpm/4.f;
++    float bestPhaseScore=-1.f,bestPhase=0.f;
++    const int phaseSteps=24;
++    for (int p=0;p<phaseSteps;p++) {
++        const float phase=sixteenth*float(p)/float(phaseSteps); double sc=0,wt=0;
++        for (int i=0;i<nf;i++) if (sm[size_t(i)]>0.f) {
++            float q=(float(i)-phase)/sixteenth; float d=std::abs(q-std::round(q)); d=std::min(d,1.f-d);
++            float w=sm[size_t(i)]; sc+=w*std::exp(-18.f*d*d); wt+=w;
++        }
++        const float z=wt>0?float(sc/wt):0.f; if (z>bestPhaseScore) { bestPhaseScore=z; bestPhase=phase; }
++    }
++    r.bpm=bpm; r.offset=(bestPhase/rate); r.confidence=std::max(0.f,best);
++    return r;
++}
++
++void write_csv(const std::string& path, const std::vector<NoteEvent>& notes, const TempoGrid& grid) {
+     std::ofstream o(path,std::ios::binary|std::ios::trunc);
+     if (!o) throw std::runtime_error("Could not create neural result file");
+-    o << "# Basscribe neural-events v1\n";
++    o << "# Basscribe neural-events v2\n";
++    o << "# bpm=" << grid.bpm << "\n";
++    o << "# grid_offset=" << grid.offset << "\n";
++    o << "# tempo_confidence=" << grid.confidence << "\n";
+     o << "time,duration,midi,confidence,onset,contour_start,contour_end,articulation\n";
+     char line[256];
+     for (auto& n:notes) {
+@@ -413,10 +698,16 @@
+         auto mono=downsample_22050(bass);
+         bass.clear(); bass.shrink_to_fit();
+         auto frames=run_basic_pitch(mono,basic,threads);
+-        mono.clear(); mono.shrink_to_fit();
+         auto notes=decode_monophonic(frames);
++        set_stage("Correcting bass fundamentals...",0.865f);
++        refine_fundamentals(notes,frames,mono);
++        consolidate_events(notes);
++        infer_articulations(notes,frames);
++        set_stage("Locking tempo and beat grid...",0.94f);
++        auto grid=estimate_tempo_grid(mono,notes);
++        mono.clear(); mono.shrink_to_fit();
+         
