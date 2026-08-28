@@ -7,6 +7,9 @@ on:
     paths:
       - 'basscribe-ci/mini/**'
       - '.github/workflows/basscribe-alpha2-temp.yml'
+  pull_request:
+    branches:
+      - basscribe-v05-build-alpha2
   workflow_dispatch:
 
 jobs:
