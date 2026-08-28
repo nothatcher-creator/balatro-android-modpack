@@ -1,0 +1,118 @@
+affR-tw/2-2)
++            lastDrawX[si]=nx
+             local active=current and math.abs((note.time or nt)-playTime)<math.max(0.13,note.duration or 0.13)
+             setColor(17,22,28)
+-            roundedRect(nx-tw/2-4,ny-fonts.fret:getHeight()/2-1,tw+8,fonts.fret:getHeight()+2,3,"fill")
++            roundedRect(nx-tw/2-4,ny-fretFont:getHeight()/2-1,tw+8,fretFont:getHeight()+2,3,"fill")
+             if active then setColor(46,220,111) else setColor(239,242,244) end
+-            love.graphics.print(txt,nx-tw/2,ny-fonts.fret:getHeight()/2-2)
++            love.graphics.print(txt,nx-tw/2,ny-fretFont:getHeight()/2-2)
+             drawn[idx]={x=nx,y=ny,active=active}
+ 
+             local stemTop=staffY+lineGap*3+10
+--- a/native/basscribe_ai.cpp
++++ b/native/basscribe_ai.cpp
+@@ -301,9 +301,27 @@
+                 emit=1.25*std::log(double(pr)+1e-6);
+             } else {
+                 int k=s-1; float p=fr[t].note[k]; float o=fr[t].onset[k];
+-                emit=1.45*std::log(double(std::clamp(p,0.002f,0.999f)));
+-                if (p<0.07f) emit-=2.4;
+-                emit+=0.32*o;
++                const int midi=MIDI_MIN+k;
++                emit=1.55*std::log(double(std::clamp(p,0.002f,0.999f)));
++                if (p<0.07f) emit-=2.55;
++                emit+=0.34*o;
++
++                // Basic Pitch exposes a continuous 1/3-semitone contour in
++                // addition to note bins.  Alpha3 only used that contour after
++                // transcription for articulations, which let harmonics win the
++                // note Viterbi path.  Use it as independent pitch evidence.
++                if (fr[t].contourConf>=0.10f) {
++                    const float cw=std::clamp((fr[t].contourConf-0.10f)/0.42f,0.f,1.f);
++                    const float dist=std::abs(fr[t].contourMidi-float(midi));
++                    if (dist<0.60f) emit+=0.92*cw;
++                    else if (dist<1.25f) emit+=0.38*cw;
++                    else if (std::abs(dist-12.f)<1.15f) emit-=1.10*cw;
++                    else if (dist>3.f) emit-=0.11*cw*std::min(dist-3.f,8.f);
++                }
++                // The top few frets are legal, but bleed/harmonics land there
++                // much more often than a normal bass fundamental. Keep this a
++                // soft prior so real high-register playing still survives.
++                if (midi>62 && p<0.45f) emit-=0.10*float(midi-62);
+             }
+             double best=NEG; int bestp=0;
+             for (int ps=0;ps<S;ps++) {
+@@ -313,9 +331,20 @@
+                 else if (ps>0 && s==0) tr=-0.20;
+                 else {
+                     int d=std::abs((MIDI_MIN+s-1)-(MIDI_MIN+ps-1));
+-                    tr=-(d<=2?0.26*d:(d<=5?0.52*d:1.6+0.24*d));
+-                    tr+=0.72*fr[t].onset[s-1];
+-                    if (d>12) tr-=2.5;
++                    const float onset=fr[t].onset[s-1];
++                    tr=-(d<=2?0.46*d:(d<=5?0.68*d:1.95+0.28*d));
++                    tr+=1.08*onset;
++                    // A legato pitch change can have little/no onset. Allow it
++                    // when the continuous contour is already sitting on the
++                    // destination; otherwise weak-onset semitone chatter pays
++                    // an extra switching cost.
++                    if (fr[t].contourConf>=0.12f) {
++                        const int nm=MIDI_MIN+s-1;
++                        const float cd=std::abs(fr[t].contourMidi-float(nm));
++                        if (cd<0.85f) tr+=0.62*fr[t].contourConf;
++                        else if (onset<0.16f) tr-=0.18;
++                    } else if (onset<0.16f) tr-=0.16;
++                    if (d>12) tr-=2.8;
+                 }
+                 double v=prev[ps]+tr;
+                 if (v>best) { best=v; bestp=ps; }
+@@ -388,10 +417,266 @@
+     return out;
+ }
+ 
+-void write_csv(const std::string& path, const std::vector<NoteEvent>& notes) {
++
++float goertzel_mag(const std::vector<float>& audio, double sec, float freq) {
++    if (audio.empty() || freq<18.f || freq>float(BP_SR)*0.48f) return 0.f;
++    constexpr int N=2048;
++    const int64_t center=int64_t(std::llround(sec*double(BP_SR)));
++    const int64_t start=center-N/2;
++    const float w=2.f*PI*freq/float(BP_SR);
++    const float coeff=2.f*std::cos(w);
++    float s1=0.f,s2=0.f;
++    for (int i=0;i<N;i++) {
++        int64_t j=std::clamp<int64_t>(start+i,0,int64_t(audio.size()-1));
++        const float win=0.5f-0.5f*std::cos(2.f*PI*float(i)/float(N-1));
++        const float s0=audio[size_t(j)]*win+coeff*s1-s2;
++        s2=s1; s1=s0;
++    }
++    float power=s1*s1+s2*s2-coeff*s1*s2;
++    return std::sqrt(std::max(0.f,power))/float(N);
++}
++
++float harmonic_fundamental_score(const std::vector<float>& audio, const NoteEvent& e, int midi) {
++    const float f=440.f*std::pow(2.f,(float(midi)-69.f)/12.f);
++    const double p1=e.time+std::min(0.055,std::max(0.018,e.duration*0.28));
++    const double p2=e.time+std::max(0.025,e.duration*0.62);
++    auto at=[&](double t)->float {
++        const float a1=goertzel_mag(audio,t,f);
++        const float a2=goertzel_mag(audio,t,f*2.f);
++        const float a3=goertzel_mag(audio,t,f*3.f);
++        const float a4=goertzel_mag(audio,t,f*4.f);
++        const float sub=goertzel_mag(audio,t,f*0.5f);
++        auto l=[](float x){ return std::log1p(55.f*x); };
++        // A correct fundamental explains a harmonic stack.  An octave-high
++        // hypothesis is specifically penalized when its half-frequency is
++        // strong, which targets the dominant alpha3 error mode.
++        return 1.18f*l(a1)+0.56f*l(a2)+0.31f*l(a3)+0.18f*l(a4)-0.88f*l(sub);
++    };
++    return 0.56f*at(p1)+0.44f*at(p2);
++}
++
++float bp_event_probability(const std::vector<FramePred>& fr, const NoteEvent& e, int midi) {
++    if (midi<MIDI_MIN || midi>MIDI_MAX) return 0.f;
++    const int k=midi-MIDI_MIN;
++    float sum=0.f,mx=0.f; int n=0;
++    const double a=e.time-0.025, b=e.time+e.duration+0.025;
++    for (auto& f:fr) if (f.time>=a && f.t
