@@ -1,0 +1,136 @@
+--- a/game/main.lua
++++ b/game/main.lua
+@@ -1,5 +1,5 @@
+ local APP_NAME = "Basscribe"
+-local VERSION = "0.5.0-ai-alpha3"
++local VERSION = "0.5.0-ai-alpha4"
+ 
+ local state = {
+     status = "Choose a song to generate a bass tab.",
+@@ -9,6 +9,7 @@
+     trackTitle = nil,
+     trackArtist = nil,
+     tempoConfidence = 0,
++    beatGridOffset = 0,
+     progress = 0,
+     processing = false,
+     notes = {},
+@@ -302,8 +303,18 @@
+             local opts = allPositions(notes[i].midi)
+             if #opts == 0 then opts = {{string=1, fret=clamp(notes[i].midi-28,0,24)}} end
+             dp[i], back[i] = {}, {}
++            local hasMidPosition=false
++            for _,alt in ipairs(opts) do
++                if alt.fret>=5 and alt.fret<=12 then hasMidPosition=true break end
++            end
+             for oi,p in ipairs(opts) do
+-                local base = math.abs(p.fret-7) * 0.075
++                local base = math.abs(p.fret-7) * 0.11
++                -- Prefer the normal mid-neck spelling when the exact same pitch
++                -- can be played there. This prevents equivalent-pitch tab errors
++                -- such as D-string 3 replacing A-string 8.
++                if hasMidPosition and p.fret>0 and p.fret<5 then
++                    base = base + 1.55 + (5-p.fret)*0.22
++                end
+                 if p.fret == 0 then base = base + 0.95 end
+                 if p.fret > 12 then base = base + (p.fret-12)*0.30 + 0.85 end
+                 if p.fret > 17 then base = base + (p.fret-17)*0.7 end
+@@ -1303,16 +1314,24 @@
+ end
+ 
+ local function quantizeDisplayTimes(notes)
+-    if #notes == 0 or state.measureDuration <= 0 then return end
+-    local step = state.measureDuration / 16 -- sixteenth-note visual grid
+-    local lastSlot = -999
++    if #notes == 0 or state.bpm <= 0 then return end
++    local beat=60/state.bpm
++    local offset=state.beatGridOffset or 0
++    -- Snap only when genuinely close to a straight-sixteenth or triplet grid.
++    -- Alpha3 forced every attack to a unique sixteenth slot globally, which
++    -- shifted later notes and made correct raw timing look wrong on screen.
+     for _,n in ipairs(notes) do
+-        local slot = math.floor((n.time / step) + 0.5)
+-        -- Keep separate attacks visually distinct when the detector puts two
+-        -- events into the same grid slot.
+-        if slot <= lastSlot and n.time > 0 then slot = lastSlot + 1 end
+-        n.displayTime = slot * step
+-        lastSlot = slot
++        local best=n.time
++        local bestErr=math.huge
++        for _,div in ipairs({4,3}) do
++            local step=beat/div
++            local slot=math.floor(((n.time-offset)/step)+0.5)
++            local q=offset+slot*step
++            local err=math.abs(q-n.time)
++            if err<bestErr then bestErr=err; best=q end
++        end
++        local snapLimit=math.min(0.065,beat*0.12)
++        n.displayTime=(bestErr<=snapLimit) and math.max(0,best) or n.time
+     end
+ end
+ 
+@@ -1478,8 +1497,12 @@
+     local data,err=love.filesystem.read(relPath)
+     if not data then error("Neural result file could not be read: "..tostring(err or "")) end
+     local notes={}
++    local neuralBpm,gridOffset,tempoConfidence=nil,0,0
+     for line in data:gmatch("[^\r\n]+") do
+-        if line:sub(1,1)~="#" and not line:match("^time,") then
++        if line:match("^# bpm=") then neuralBpm=tonumber(line:match("=([%d%.%-]+)"))
++        elseif line:match("^# grid_offset=") then gridOffset=tonumber(line:match("=([%d%.%-]+)")) or 0
++        elseif line:match("^# tempo_confidence=") then tempoConfidence=tonumber(line:match("=([%d%.%-]+)")) or 0
++        elseif line:sub(1,1)~="#" and not line:match("^time,") then
+             local t,d,m,c,on,cs,ce,art=line:match("^([^,]+),([^,]+),([^,]+),([^,]+),([^,]+),([^,]+),([^,]+),([^,]*)")
+             if t and m then
+                 local midi=tonumber(m)
+@@ -1501,7 +1524,7 @@
+         end
+     end
+     table.sort(notes,function(a,b) return a.time<b.time end)
+-    return notes
++    return notes,neuralBpm,gridOffset,tempoConfidence
+ end
+ 
+ local function beginAnalysis(path)
+@@ -1549,10 +1572,13 @@
+         end
+ 
+         state.status="Optimizing bass fingering..."
+-        state.detail="Monophonic continuity + realistic E-A-D-G positions"
++        state.detail="Fundamental-corrected pitch path + realistic E-A-D-G positions"
+         coroutine.yield()
+-        local notes=parseAIResults(resultRel)
+-        state.bpm=estimateTempo(notes,nil)
++        local notes,neuralBpm,gridOffset,tempoConf=parseAIResults(resultRel)
++        if #notes==0 then error("The neural engine found no stable bass notes in this track.") end
++        state.bpm=(neuralBpm and neuralBpm>=70 and neuralBpm<=220) and math.floor(neuralBpm+0.5) or estimateTempo(notes,nil)
++        state.tempoConfidence=tempoConf or 0
++        state.beatGridOffset=gridOffset or 0
+         state.measureDuration=240/state.bpm
+         layoutPositions(notes)
+         applyArticulations(notes)
+@@ -1860,6 +1886,13 @@
+     end
+ 
+     local drawn={}
++    local measureNoteCount=0
++    for _,note in ipairs(state.notes) do
++        local nt=note.displayTime or note.time
++        if nt>=startT and nt<endT then measureNoteCount=measureNoteCount+1 end
++    end
++    local fretFont=(measureNoteCount>=11) and fonts.small or fonts.fret
++    local lastDrawX={}
+     for idx,note in ipairs(state.notes) do
+         local nt=note.displayTime or note.time
+         if nt>=startT and nt<endT then
+@@ -1867,13 +1900,17 @@
+             local nx=staffX+staffW*frac
+             local ny=noteYForString(staffY,note.string or 1,lineGap)
+             local txt=tostring(note.fret or 0)
+-            love.graphics.setFont(fonts.fret)
+-            local tw=fonts.fret:getWidth(txt)
++            love.graphics.setFont(fretFont)
++            local tw=fretFont:getWidth(txt)
++            local si=note.string or 1
++            if lastDrawX[si] and nx-lastDrawX[si] < tw+5 then nx=lastDrawX[si]+tw+5 end
++            nx=math.min(nx,st
