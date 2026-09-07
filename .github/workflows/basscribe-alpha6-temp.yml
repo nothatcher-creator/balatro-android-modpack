@@ -1,0 +1,253 @@
+name: Basscribe alpha6 build and Android emulator QA
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/basscribe-alpha6-temp.yml'
+  workflow_dispatch:
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout alpha6 build branch
+        uses: actions/checkout@v4
+        with:
+          ref: basscribe-v05-build-alpha6
+
+      - name: Reconstruct alpha6 source and run regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat \
+            basscribe-ci/alpha4-source/part00 \
+            basscribe-ci/alpha4-source/part01 \
+            basscribe-ci/alpha4-source/part02 \
+            basscribe-ci/alpha4-source/part03 \
+            basscribe-ci/alpha4-source/part04 \
+            basscribe-ci/alpha4-source-fix/part05a \
+            basscribe-ci/alpha4-source-fix/part05b \
+            basscribe-ci/alpha4-source-fix/part05c \
+            basscribe-ci/alpha4-source-fix/part05d \
+            basscribe-ci/alpha4-source/part06 \
+            basscribe-ci/alpha4-source/part07 \
+            basscribe-ci/alpha4-source/part08 \
+            basscribe-ci/alpha4-source/part09 \
+            basscribe-ci/alpha4-source/part10 | base64 -d > /tmp/alpha4.zip
+          echo '43e8f9ee05b70fdc379534b976ed977261492ea18085ec6ed059e3ba5c877f5e  /tmp/alpha4.zip' | sha256sum -c -
+          rm -rf /tmp/basscribe-alpha6 /tmp/basscribe-alpha5
+          mkdir -p /tmp/basscribe-alpha6
+          unzip -q /tmp/alpha4.zip -d /tmp/basscribe-alpha6
+          ln -s /tmp/basscribe-alpha6 /tmp/basscribe-alpha5
+          python3 basscribe-ci/alpha5_patch.py
+          cd /tmp/basscribe-alpha6/basscribe_alpha4
+          echo '90265c0aee123e1c1d26d665ab2619c600099d0a067f8f7aa19654604d16759f  game/main.lua' | sha256sum -c -
+          echo '05f7ad21622c1e883e780104a3dfc9adf860e655e815521b56a7e2a8efae4366  native/basscribe_ai.cpp' | sha256sum -c -
+          echo 'e21fad561046e86a2cdcb6e618f0daaf2eea865e4b2967ed4d834fa8164d135a  build_android.sh' | sha256sum -c -
+          patch -p0 < "$GITHUB_WORKSPACE/basscribe-ci/alpha6-runtime.patch"
+          cp "$GITHUB_WORKSPACE/basscribe-ci/alpha6-support/pitch_periodicity.h" native/pitch_periodicity.h
+          mkdir -p tests
+          cp "$GITHUB_WORKSPACE/basscribe-ci/alpha6-support/test_fingering.lua" tests/test_fingering.lua
+          cp "$GITHUB_WORKSPACE/basscribe-ci/alpha6-support/generate_qa_fixture.py" tests/generate_qa_fixture.py
+          echo '171a981299873372fa166d1fefdb4a80bfa311c016168d0d9db6c219d4320430  game/main.lua' | sha256sum -c -
+          echo '98d59952f64a3eb33318b3234039f68979c87b941c6e86c849d86a7e90c0a801  native/basscribe_ai.cpp' | sha256sum -c -
+          echo '26dc3c764c1fd4bb4aa245dcae08d5b738ca74814d184c0758a683b95cd8dc54  native/pitch_periodicity.h' | sha256sum -c -
+          echo 'f867daed945de1a27ca04f3e99036ec04b149238e47a615760d72417945ed0a5  build_android.sh' | sha256sum -c -
+          python3 - <<'PY'
+          from pathlib import Path
+          main=Path('game/main.lua').read_text(); cpp=Path('native/basscribe_ai.cpp').read_text(); build=Path('build_android.sh').read_text()
+          assert 'local VERSION = "0.5.0-ai-alpha6"' in main
+          assert 'onset=clamp(tonumber(on) or 0,0,1)' in main
+          assert 'targetFret' in main and 'math.abs(p.fret-targetFret)' in main
+          assert 'displaySlot' in main and 'local fine=beat/12' in main
+          assert 'love.graphics.print("/",pt.x-16' not in main
+          assert 'love.graphics.print(label,pt.x-4' not in main
+          assert 'BASSCRIBE_RESULT version=%s' in main
+          assert '#include "pitch_periodicity.h"' in cpp and 'best_periodicity_midi' in cpp
+          assert 'app.version_code=54' in build and 'app.version_name=0.5.0-ai-alpha6' in build
+          print('alpha6 source regression: PASS')
+          PY
+          g++ -std=c++17 -O2 -I native "$GITHUB_WORKSPACE/basscribe-ci/alpha6-support/test_pitch_periodicity.cpp" -o /tmp/test_pitch_periodicity
+          /tmp/test_pitch_periodicity
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq lua5.4
+          lua5.4 tests/test_fingering.lua
+          bash -n build_android.sh
+
+      - name: Package prepared source
+        shell: bash
+        run: tar -C /tmp/basscribe-alpha6 -czf alpha6-prepared.tgz basscribe_alpha4
+
+      - name: Upload prepared source
+        uses: actions/upload-artifact@v4
+        with:
+          name: basscribe-alpha6-prepared-source
+          path: alpha6-prepared.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  arm64:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: basscribe-alpha6-prepared-source
+      - name: Extract source
+        run: |
+          mkdir -p /tmp/basscribe-alpha6
+          tar -C /tmp/basscribe-alpha6 -xzf alpha6-prepared.tgz
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Build ARM64 APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/basscribe-alpha6/basscribe_alpha4
+          chmod +x build_android.sh
+          ./build_android.sh
+      - name: Inspect and stage ARM64 APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT=/tmp/basscribe-alpha6/basscribe_alpha4
+          APK="$ROOT/dist/Basscribe-v0.5.0-ai-alpha6-arm64.apk"
+          test -s "$APK"
+          unzip -t "$APK" >/dev/null
+          unzip -p "$APK" assets/game.love > /tmp/game.love
+          unzip -t /tmp/game.love >/dev/null
+          unzip -p /tmp/game.love main.lua > /tmp/main.lua
+          grep -F 'local VERSION = "0.5.0-ai-alpha6"' /tmp/main.lua
+          grep -F 'local fine=beat/12' /tmp/main.lua
+          grep -F 'BASSCRIBE_RESULT version=%s' /tmp/main.lua
+          ! grep -F 'love.graphics.print("/",pt.x-16' /tmp/main.lua
+          unzip -p "$APK" lib/arm64-v8a/libbasscribe_ai.so > /tmp/libbasscribe_ai.so
+          strings /tmp/libbasscribe_ai.so | grep -F '0.5.0-ai-alpha6/ort'
+          cp "$APK" "$GITHUB_WORKSPACE/Basscribe-v0.5.0-ai-alpha6-arm64.apk"
+          sha256sum "$GITHUB_WORKSPACE/Basscribe-v0.5.0-ai-alpha6-arm64.apk" | tee "$GITHUB_WORKSPACE/Basscribe-v0.5.0-ai-alpha6-arm64.apk.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Basscribe-v0.5.0-ai-alpha6-arm64
+          path: |
+            Basscribe-v0.5.0-ai-alpha6-arm64.apk
+            Basscribe-v0.5.0-ai-alpha6-arm64.apk.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  emulator_qa:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: basscribe-alpha6-prepared-source
+      - name: Extract source
+        run: |
+          mkdir -p /tmp/basscribe-alpha6
+          tar -C /tmp/basscribe-alpha6 -xzf alpha6-prepared.tgz
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Build x86_64 QA APK and fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/basscribe-alpha6/basscribe_alpha4
+          python3 tests/generate_qa_fixture.py
+          chmod +x build_android.sh
+          BASSCRIBE_ABI=x86_64 ./build_android.sh
+      - name: Android emulator QA
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          cores: 4
+          ram-size: 4096M
+          heap-size: 1024M
+          disk-size: 6000M
+          disable-animations: true
+          script: |
+            set -euo pipefail
+            ROOT=/tmp/basscribe-alpha6/basscribe_alpha4
+            APK="$ROOT/dist/Basscribe-v0.5.0-ai-alpha6-x86_64.apk"
+            FIX="$ROOT/tests/qa_pitch_fixture.wav"
+            adb devices
+            adb install -r "$APK"
+            adb push "$FIX" /sdcard/Download/qa_pitch_fixture.wav
+            adb logcat -c
+            PKG=com.brad.basscrib7
+            ACT=$(adb shell cmd package resolve-activity --brief "$PKG" | tr -d '\r' | tail -1)
+            test -n "$ACT"
+            adb shell am force-stop "$PKG"
+            adb shell am start -n "$ACT"
+            sleep 5
+            dump_ui() { adb exec-out uiautomator dump /dev/tty | sed -n '/<?xml/,$p' > /tmp/ui.xml || true; }
+            pick_text() {
+              python3 - "$1" <<'PY'
+            import sys, xml.etree.ElementTree as ET, re
+            needle=sys.argv[1].lower(); text=open('/tmp/ui.xml','r',errors='ignore').read(); start=text.find('<?xml')
+            if start<0: raise SystemExit(2)
+            root=ET.fromstring(text[start:])
+            for n in root.iter('node'):
+                hay=((n.attrib.get('text') or '')+' '+(n.attrib.get('content-desc') or '')).lower()
+                if needle in hay:
+                    m=re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]',n.attrib.get('bounds',''))
+                    if m:
+                        x1,y1,x2,y2=map(int,m.groups()); print((x1+x2)//2,(y1+y2)//2); raise SystemExit(0)
+            raise SystemExit(3)
+            PY
+            }
+            dump_ui
+            if ! XY=$(pick_text 'qa_pitch_fixture.wav'); then
+              if XY=$(pick_text 'Downloads'); then adb shell input tap $XY; sleep 2; dump_ui; fi
+            fi
+            XY=$(pick_text 'qa_pitch_fixture.wav')
+            adb shell input tap $XY
+            FOUND=0
+            for i in $(seq 1 180); do
+              adb logcat -d > /tmp/logcat.txt
+              if grep -F 'BASSCRIBE_ERROR' /tmp/logcat.txt; then exit 1; fi
+              if grep -F 'BASSCRIBE_RESULT version=0.5.0-ai-alpha6' /tmp/logcat.txt; then FOUND=1; break; fi
+              sleep 5
+            done
+            test "$FOUND" = 1
+            grep -F 'BASSCRIBE_RESULT version=0.5.0-ai-alpha6' /tmp/logcat.txt | tail -1 | tee /tmp/result.txt
+            python3 - <<'PY'
+            import re
+            line=open('/tmp/result.txt').read().strip(); m=re.search(r'first=(.*)$',line); assert m, line
+            tokens=[]
+            for part in m.group(1).split('|'):
+                f=part.split(':')
+                if len(f)>=4: tokens.append((float(f[0]),int(f[1]),f[2]))
+            mids=[m for _,m,_ in tokens]; assert tokens, line
+            assert 41 in mids[:4], mids[:10]
+            i=mids.index(41)
+            assert 48 in mids[i+1:12], mids[:12]
+            assert 45 in mids[:16], mids[:16]
+            assert 52 in mids[:20], mids[:20]
+            assert any(m==48 and pos=='D10' for _,m,pos in tokens[:16]), tokens[:16]
+            print('android neural QA regression: PASS', tokens[:12])
+            PY
+            adb exec-out screencap -p > "$GITHUB_WORKSPACE/alpha6-emulator.png"
+            cp /tmp/logcat.txt "$GITHUB_WORKSPACE/alpha6-logcat.txt"
+            adb exec-out uiautomator dump /dev/tty | sed -n '/<?xml/,$p' > "$GITHUB_WORKSPACE/alpha6-final-ui.xml" || true
+      - name: Upload emulator evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Basscribe-alpha6-emulator-QA
+          path: |
+            alpha6-emulator.png
+            alpha6-logcat.txt
+            alpha6-final-ui.xml
+          if-no-files-found: warn
+          retention-days: 7
