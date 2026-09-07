@@ -12,10 +12,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - name: Checkout alpha6 build branch
+      - name: Checkout exact alpha6 source commit
         uses: actions/checkout@v4
         with:
-          ref: basscribe-v05-build-alpha6
+          ref: 62c1f3122bb4c6903ce3def9a90550c3df7c2a67
 
       - name: Reconstruct exact alpha6 source
         shell: bash
@@ -69,6 +69,26 @@ jobs:
           chmod +x build_android.sh
           BASSCRIBE_ABI=x86_64 ./build_android.sh
 
+      - name: Prepare host-side diagnostic evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          EVID="$GITHUB_WORKSPACE/alpha6-diagnostic"
+          ROOT=/tmp/basscribe-alpha6/basscribe_alpha4
+          mkdir -p "$EVID"
+          echo "$(date -u +%FT%TZ) host-before-emulator" > "$EVID/status.txt"
+          {
+            echo "checked_out_commit=$(git rev-parse HEAD)"
+            echo "expected_source_commit=62c1f3122bb4c6903ce3def9a90550c3df7c2a67"
+            uname -a
+            java -version 2>&1
+            df -h
+          } > "$EVID/host-before.txt"
+          test "$(git rev-parse HEAD)" = '62c1f3122bb4c6903ce3def9a90550c3df7c2a67'
+          ls -lh \
+            "$ROOT/dist/Basscribe-v0.5.0-ai-alpha6-x86_64.apk" \
+            "$ROOT/tests/qa_pitch_fixture.wav" > "$EVID/built-files.txt"
+
       - name: Android emulator diagnostic
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -88,10 +108,11 @@ jobs:
             FIX="$ROOT/tests/qa_pitch_fixture.wav"
             EVID="$GITHUB_WORKSPACE/alpha6-diagnostic"
             mkdir -p "$EVID"
-            : > "$EVID/status.txt"
             mark() { echo "$(date -u +%FT%TZ) $*" | tee -a "$EVID/status.txt"; }
             capture() {
               set +e
+              adb devices -l > "$EVID/adb-devices-final.txt" 2>&1
+              adb shell getprop sys.boot_completed > "$EVID/boot-completed-final.txt" 2>&1
               adb logcat -d > "$EVID/logcat.txt" 2>&1
               adb exec-out screencap -p > "$EVID/screen.png" 2>/dev/null
               adb exec-out uiautomator dump /dev/tty | sed -n '/<?xml/,$p' > "$EVID/ui-current.xml" 2>/dev/null
@@ -102,8 +123,12 @@ jobs:
             }
             trap 'rc=$?; mark "EXIT rc=$rc"; capture; exit $rc' EXIT
 
-            mark 'adb-ready'
-            adb devices | tee "$EVID/adb-devices.txt"
+            mark 'script-entered'
+            command -v adb | tee "$EVID/adb-path.txt"
+            adb devices -l | tee "$EVID/adb-devices.txt"
+            mark 'wait-for-device'
+            adb wait-for-device
+            mark "boot-completed=$(adb shell getprop sys.boot_completed | tr -d '\r')"
             mark 'install-apk'
             adb install -r "$APK" | tee "$EVID/install.txt"
             mark 'push-fixture'
@@ -187,6 +212,26 @@ jobs:
             mark 'ANDROID-NEURAL-QA-PASS'
             capture
             trap - EXIT
+
+      - name: Collect host-side post-emulator evidence
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          EVID="$GITHUB_WORKSPACE/alpha6-diagnostic"
+          mkdir -p "$EVID"
+          echo "$(date -u +%FT%TZ) host-after-emulator" >> "$EVID/status.txt"
+          {
+            echo '=== adb ==='
+            command -v adb || true
+            adb devices -l || true
+            echo '=== emulator/qemu processes ==='
+            ps aux | grep -E '[e]mulator|[q]emu' || true
+            echo '=== android avd files ==='
+            find "$HOME/.android/avd" -maxdepth 2 -type f -printf '%p %s bytes\n' 2>/dev/null | head -200 || true
+            echo '=== disk ==='
+            df -h || true
+          } > "$EVID/host-after.txt" 2>&1
 
       - name: Upload diagnostic evidence
         if: always()
