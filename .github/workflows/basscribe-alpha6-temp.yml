@@ -46,7 +46,9 @@ jobs:
           echo '90265c0aee123e1c1d26d665ab2619c600099d0a067f8f7aa19654604d16759f  game/main.lua' | sha256sum -c -
           echo '05f7ad21622c1e883e780104a3dfc9adf860e655e815521b56a7e2a8efae4366  native/basscribe_ai.cpp' | sha256sum -c -
           echo 'e21fad561046e86a2cdcb6e618f0daaf2eea865e4b2967ed4d834fa8164d135a  build_android.sh' | sha256sum -c -
-          patch -p0 < "$GITHUB_WORKSPACE/basscribe-ci/alpha6-runtime.patch"
+          sed 's/arm64-v88a/arm64-v8a/' "$GITHUB_WORKSPACE/basscribe-ci/alpha6-runtime.patch" > /tmp/alpha6-runtime.patch
+          echo '57964f38b4305302861df8f6f5cc1b5c654a496fcb9028391b004bfc34ea1230  /tmp/alpha6-runtime.patch' | sha256sum -c -
+          patch -p0 < /tmp/alpha6-runtime.patch
           cp "$GITHUB_WORKSPACE/basscribe-ci/alpha6-support/pitch_periodicity.h" native/pitch_periodicity.h
           mkdir -p tests
           cp "$GITHUB_WORKSPACE/basscribe-ci/alpha6-support/test_fingering.lua" tests/test_fingering.lua
