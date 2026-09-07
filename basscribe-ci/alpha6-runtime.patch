@@ -1,0 +1,357 @@
+--- game/main.lua
++++ game/main.lua
+@@ -1,5 +1,5 @@
+ local APP_NAME = "Basscribe"
+-local VERSION = "0.5.0-ai-alpha5"
++local VERSION = "0.5.0-ai-alpha6"
+ 
+ local state = {
+     status = "Choose a song to generate a bass tab.",
+@@ -299,6 +299,29 @@
+ 
+     local function solveChunk(a, b)
+         local dp, back = {}, {}
++
++        -- Choose the hand-position center from the phrase itself instead of
++        -- hard-coding fret 7. Alpha5 therefore preferred G5 over the equally
++        -- pitched D10 in phrases that clearly live around frets 7-10.
++        local targetFret,bestTargetCost=7,nil
++        for center=5,12 do
++            local cost=0
++            for j=a,b do
++                local opts=allPositions(notes[j].midi)
++                local best=99
++                for _,q in ipairs(opts) do
++                    local c=math.abs(q.fret-center)
++                    if q.fret<4 then c=c+2.2 end
++                    if q.fret>14 then c=c+1.8+(q.fret-14)*0.3 end
++                    if c<best then best=c end
++                end
++                cost=cost+best
++            end
++            if not bestTargetCost or cost<bestTargetCost then
++                bestTargetCost,targetFret=cost,center
++            end
++        end
++
+         for i=a,b do
+             local opts = allPositions(notes[i].midi)
+             if #opts == 0 then opts = {{string=1, fret=clamp(notes[i].midi-28,0,24)}} end
+@@ -308,12 +331,15 @@
+                 if alt.fret>=5 and alt.fret<=12 then hasMidPosition=true break end
+             end
+             for oi,p in ipairs(opts) do
+-                local base = math.abs(p.fret-7) * 0.11
++                local base = math.abs(p.fret-targetFret) * 0.17
+                 -- Prefer the normal mid-neck spelling when the exact same pitch
+                 -- can be played there. This prevents equivalent-pitch tab errors
+                 -- such as D-string 3 replacing A-string 8.
+                 if hasMidPosition and p.fret>0 and p.fret<5 then
+-                    base = base + 1.55 + (5-p.fret)*0.22
++                    base = base + 1.45 + (5-p.fret)*0.22
++                end
++                if hasMidPosition and targetFret>=8 and p.fret==5 then
++                    base = base + 0.50
+                 end
+                 if p.fret == 0 then base = base + 0.95 end
+                 if p.fret > 12 then base = base + (p.fret-12)*0.30 + 0.85 end
+@@ -1322,25 +1348,20 @@
+     if #notes == 0 or state.bpm <= 0 then return end
+     local beat=60/state.bpm
+     local offset=state.beatGridOffset or 0
+-    -- Snap only when genuinely close to a straight-sixteenth or triplet grid.
+-    -- Alpha3 forced every attack to a unique sixteenth slot globally, which
+-    -- shifted later notes and made correct raw timing look wrong on screen.
++    -- Use the common 1/12-beat grid. It contains straight sixteenths and
++    -- eighth-note triplets, so dense passages get stable visual slots without
++    -- inventing a different x-position for every neural frame.
++    local fine=beat/12
++    local snapLimit=math.min(0.095,beat*0.16)
+     for _,n in ipairs(notes) do
+-        local best=n.time
+-        local bestErr=math.huge
+-        for _,div in ipairs({4,3}) do
+-            local step=beat/div
+-            local slot=math.floor(((n.time-offset)/step)+0.5)
+-            local q=offset+slot*step
+-            local err=math.abs(q-n.time)
+-            if err<bestErr then bestErr=err; best=q end
+-        end
+-        local snapLimit=math.min(0.065,beat*0.12)
+-        n.displayTime=(bestErr<=snapLimit) and math.max(0,best) or n.time
++        local slot=math.floor(((n.time-offset)/fine)+0.5)
++        local q=offset+slot*fine
++        local err=math.abs(q-n.time)
++        n.displaySlot=slot
++        n.displayTime=(err<=snapLimit) and math.max(0,q) or n.time
+     end
+ end
+ 
+-
+ local function collapseDisplayEvents(notes)
+     if #notes < 2 then return notes end
+     table.sort(notes,function(a,b)
+@@ -1349,25 +1370,44 @@
+         return at<bt
+     end)
+     local out={}
++    local beat=(state.bpm and state.bpm>0) and 60/state.bpm or 0.60
++    local microLimit=math.min(0.095,beat*0.16)
++    local function onset(n) return tonumber(n.onsetConfidence or n.onset) or 0 end
+     local function score(n)
+-        local c=tonumber(n.confidence) or 0; local o=tonumber(n.onset) or 0
++        local c=tonumber(n.confidence) or 0
++        local o=onset(n)
+         local d=math.min(0.30,tonumber(n.duration) or 0)
+-        return c*0.62+o*0.32+d*0.20
++        return c*0.58+o*0.34+d*0.18
+     end
+     for _,n in ipairs(notes) do
+         local p=out[#out]
+         if p then
+             local nt=n.displayTime or n.time or 0; local pt=p.displayTime or p.time or 0
+             local rawGap=(n.time or nt)-(p.time or pt)
+-            local sameSlot=math.abs(nt-pt)<=0.018
+-            local micro=rawGap>=0 and rawGap<0.070 and ((n.onset or 0)<0.54 or (p.onset or 0)<0.54)
++            local sameSlot=(n.displaySlot~=nil and p.displaySlot~=nil and n.displaySlot==p.displaySlot)
++                or math.abs(nt-pt)<=0.020
++            local bothStrong=onset(n)>=0.66 and onset(p)>=0.66
++            local samePitch=(n.midi==p.midi)
++            local nearPitch=math.abs((n.midi or 0)-(p.midi or 0))<=1
++            local micro=rawGap>=0 and rawGap<microLimit and (not bothStrong or samePitch or nearPitch)
+             if sameSlot or micro then
+                 local keepN=score(n)>score(p)+0.035
+                 local start=math.min(p.time or pt,n.time or nt)
+                 local finish=math.max((p.time or pt)+(p.duration or 0),(n.time or nt)+(n.duration or 0))
+-                if keepN then n.time=start; n.duration=math.max(0.06,finish-start); n.displayTime=math.min(pt,nt); out[#out]=n
+-                else p.time=start; p.duration=math.max(p.duration or 0,finish-start); p.displayTime=math.min(pt,nt); p.confidence=math.max(p.confidence or 0,n.confidence or 0); p.onset=math.max(p.onset or 0,n.onset or 0) end
+-            else out[#out+1]=n end
++                if keepN then
++                    n.time=start; n.duration=math.max(0.06,finish-start)
++                    n.displayTime=math.min(pt,nt)
++                    n.displaySlot=math.min(p.displaySlot or 999999,n.displaySlot or 999999)
++                    out[#out]=n
++                else
++                    p.time=start; p.duration=math.max(p.duration or 0,finish-start)
++                    p.displayTime=math.min(pt,nt)
++                    p.confidence=math.max(p.confidence or 0,n.confidence or 0)
++                    p.onsetConfidence=math.max(onset(p),onset(n)); p.onset=p.onsetConfidence
++                end
++            else
++                out[#out+1]=n
++            end
+         else out[#out+1]=n end
+     end
+     return out
+@@ -1552,6 +1592,7 @@
+                         midi=midi,
+                         confidence=clamp(tonumber(c) or 0.5,0,1),
+                         onsetConfidence=clamp(tonumber(on) or 0,0,1),
++                        onset=clamp(tonumber(on) or 0,0,1),
+                         contourStart=tonumber(cs), contourEnd=tonumber(ce),
+                         articulation=articulation,
+                         eventKind=articulation and "legato" or "attack",
+@@ -1630,6 +1671,12 @@
+         state.progress=1; state.processing=false
+         state.status=(#notes>0) and "Bass tab ready" or "Analysis finished"
+         state.detail=string.format("%d neural note events • ~%d BPM • Demucs + Basic Pitch",#notes,state.bpm)
++        local debugTokens={}
++        for i=1,math.min(40,#notes) do
++            local n=notes[i]
++            debugTokens[#debugTokens+1]=string.format("%.3f:%d:%s%d",n.time or 0,n.midi or -1,({"E","A","D","G"})[n.string or 1] or "?",n.fret or -1)
++        end
++        print(string.format("BASSCRIBE_RESULT version=%s bpm=%d notes=%d first=%s",VERSION,state.bpm,#notes,table.concat(debugTokens,"|")))
+         pcall(function() love.filesystem.remove(wavRel) end)
+         setupPlayback(path)
+     end)
+@@ -1770,6 +1817,7 @@
+                 pcall(function() ai.lib.basscribe_ai_reap() end)
+             end
+             state.processing=false; state.error=tostring(err); state.status="Analysis failed"; state.detail="Try another audio file or a clearer bass mix."; analyzer=nil
++            print("BASSCRIBE_ERROR "..tostring(state.error))
+         elseif coroutine.status(analyzer)=="dead" then analyzer=nil end
+     end
+ 
+@@ -1942,8 +1990,10 @@
+             local tw=fretFont:getWidth(txt)
+             nx=clamp(nx,staffX+tw/2+2,staffR-tw/2-2)
+             local active=current and math.abs((note.time or nt)-playTime)<math.max(0.13,note.duration or 0.13)
+-            setColor(17,22,28)
+-            roundedRect(nx-tw/2-4,ny-fretFont:getHeight()/2-1,tw+8,fretFont:getHeight()+2,3,"fill")
++            -- Knock out only the staff line behind the number. Alpha5's full
++            -- rounded note boxes made dense bars look like overlapping cards.
++            setColor(current and 18 or 17,current and 31 or 22,current and 25 or 28)
++            love.graphics.rectangle("fill",nx-tw/2-2,ny-2,tw+4,4)
+             if active then setColor(46,220,111) else setColor(239,242,244) end
+             love.graphics.print(txt,nx-tw/2,ny-fretFont:getHeight()/2-2)
+             drawn[idx]={x=nx,y=ny,active=active}
+@@ -1970,9 +2020,7 @@
+                     setColor(183,191,199); love.graphics.setLineWidth(1.4)
+                     local sx=prev.x+8; local sy=prev.y
+                     local ex=pt.x-8; local ey=pt.y
+-                    if ex>sx+3 then love.graphics.line(sx,sy,ex,ey) end
+-                else
+-                    love.graphics.setFont(fonts.tiny); setColor(183,191,199); love.graphics.print("/",pt.x-16,pt.y-25)
++                    if ex>sx+6 then love.graphics.line(sx,sy,ex,ey) end
+                 end
+             elseif note.articulation=="hammer" or note.articulation=="pull" then
+                 local label=(note.articulation=="hammer") and "H" or "P"
+@@ -1991,8 +2039,6 @@
+                         love.graphics.setFont(fonts.tiny); setColor(198,207,214)
+                         love.graphics.print(label,mid-fonts.tiny:getWidth(label)/2,base-7)
+                     end
+-                else
+-                    love.graphics.setFont(fonts.tiny); setColor(198,207,214); love.graphics.print(label,pt.x-4,pt.y-27)
+                 end
+             end
+         end
+@@ -2142,3 +2188,13 @@
+ function love.touchreleased(id,x,y,dx,dy,pressure) endPointer(x,y) end
+ 
+ function love.quit() releasePlayback() end
++
++-- Pure-layout hooks used by the CI regression suite. They are inert in normal
++-- app runs because BASSCRIBE_TEST is never set by the packaged Android app.
++if rawget(_G,"BASSCRIBE_TEST") then
++    _G.BasscribeTest={
++        allPositions=allPositions,
++        layoutPositions=layoutPositions,
++        state=state,
++    }
++end
+--- native/basscribe_ai.cpp
++++ native/basscribe_ai.cpp
+@@ -1,4 +1,5 @@
+ #include <onnxruntime_cxx_api.h>
++#include "pitch_periodicity.h"
+ 
+ #include <algorithm>
+ #include <array>
+@@ -488,11 +489,30 @@
+         const int m=notes[i].midi;
+         add(m); add(m-12); add(m+12); add(m-2); add(m-1); add(m+1); add(m+2);
+         if (cc>0.10f) { int c=int(std::lround(cm)); add(c); add(c-1); add(c+1); add(c-12); }
++
++        // Alpha5 could only repair +/-2 semitone or octave errors. The real
++        // Californication comparison exposed a +7-semitone false C3 where the
++        // actual F2 was not even in the candidate set. Search the isolated bass
++        // stem for an independent periodicity fundamental and always include it.
++        const int periodicMidi=basscribe::best_periodicity_midi(
++            audio,BP_SR,notes[i].time,notes[i].duration,MIDI_MIN,std::min(MIDI_MAX,60));
++        add(periodicMidi); add(periodicMidi-1); add(periodicMidi+1);
++        const float periodicBest=basscribe::event_periodicity_score(
++            audio,BP_SR,notes[i].time,notes[i].duration,periodicMidi);
++        const bool usePeriodicity=periodicBest>=0.42f;
++
+         std::sort(v.begin(),v.end()); cand[i]=v;
+         for (int c:v) {
+             const float bp=bp_event_probability(fr,notes[i],c);
+             const float hs=harmonic_fundamental_score(audio,notes[i],c);
+             double score=2.05*std::log(double(bp)+0.025)+1.12*double(hs);
++            if (usePeriodicity) {
++                const float ps=basscribe::event_periodicity_score(
++                    audio,BP_SR,notes[i].time,notes[i].duration,c);
++                const float pp=std::clamp((ps+0.15f)/1.15f,0.018f,0.999f);
++                score+=1.30*std::log(double(pp));
++                if (c==periodicMidi) score+=0.24*std::clamp((periodicBest-0.42f)/0.48f,0.f,1.f);
++            }
+             if (cc>0.10f) {
+                 const float d=std::abs(float(c)-cm);
+                 const float cw=std::clamp((cc-0.10f)/0.38f,0.f,1.f);
+@@ -723,7 +743,7 @@
+ } // namespace
+ 
+ extern "C" {
+-__attribute__((visibility("default"))) const char* basscribe_ai_version(void) { return "0.5.0-ai-alpha5/ort"; }
++__attribute__((visibility("default"))) const char* basscribe_ai_version(void) { return "0.5.0-ai-alpha6/ort"; }
+ __attribute__((visibility("default"))) int basscribe_ai_state(void) { return g_state.load(); }
+ __attribute__((visibility("default"))) float basscribe_ai_progress(void) { return g_progress.load(); }
+ __attribute__((visibility("default"))) const char* basscribe_ai_stage(void) {
+--- build_android.sh
++++ build_android.sh
+@@ -3,6 +3,8 @@
+ 
+ ROOT="$(cd "$(dirname "$0")" && pwd)"
+ BUILD="${ROOT}/.build"
++ABI="${BASSCRIBE_ABI:-arm64-v8a}"
++if [[ "$ABI" == "arm64-v8a" ]]; then OUT_ABI="arm64"; else OUT_ABI="$ABI"; fi
+ LOVE_SHA="4c65fff4f8b38693aca5d91bc06f254f86a97adf"
+ ORT_VERSION="1.29.0"
+ ORT_AAR="https://repo.maven.apache.org/maven2/com/microsoft/onnxruntime/onnxruntime-android/${ORT_VERSION}/onnxruntime-android-${ORT_VERSION}.aar"
+@@ -36,10 +38,10 @@
+ curl -fL --retry 4 "$DEMUCS_URL" -o "$BUILD/models/htdemucs_ft_bass_fp16weights.onnx"
+ echo "${DEMUCS_SHA}  $BUILD/models/htdemucs_ft_bass_fp16weights.onnx" | sha256sum -c -
+ 
+-echo "[4/8] Compiling ARM64 neural bridge..."
++echo "[4/8] Compiling $ABI neural bridge..."
+ cmake -S "$ROOT/native" -B "$BUILD/native" -GNinja \
+   -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+-  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-23 \
++  -DANDROID_ABI="$ABI" -DANDROID_PLATFORM=android-23 \
+   -DORT_ROOT="$BUILD/ort" -DCMAKE_BUILD_TYPE=Release
+ cmake --build "$BUILD/native" --config Release
+ 
+@@ -60,15 +62,16 @@
+ git -C "$BUILD/love-android" submodule update --init --recursive --quiet
+ 
+ LOVE="$BUILD/love-android"
+-mkdir -p "$LOVE/app/src/embed/assets" "$LOVE/app/src/main/jniLibs/arm64-v8a"
++mkdir -p "$LOVE/app/src/embed/assets" "$LOVE/app/src/main/jniLibs/$ABI"
+ cp "$BUILD/game.love" "$LOVE/app/src/embed/assets/game.love"
+-cp "$BUILD/native/libbasscribe_ai.so" "$LOVE/app/src/main/jniLibs/arm64-v8a/"
+-cp "$BUILD/ort/jni/arm64-v8a/libonnxruntime.so" "$LOVE/app/src/main/jniLibs/arm64-v8a/"
++cp "$BUILD/native/libbasscribe_ai.so" "$LOVE/app/src/main/jniLibs/$ABI/"
++cp "$BUILD/ort/jni/$ABI/libonnxruntime.so" "$LOVE/app/src/main/jniLibs/$ABI/"
+ 
+-python3 - "$LOVE" <<'PY'
++python3 - "$LOVE" "$ABI" <<'PY'
+ from pathlib import Path
+ import sys
+ root=Path(sys.argv[1])
++abi=sys.argv[2]
+ p=root/'gradle.properties'
+ s=p.read_text()
+ lines=[]
+@@ -77,21 +80,21 @@
+     elif line.startswith('#app.name=') or line.startswith('app.name='): lines.append('app.name=Basscribe')
+     elif line.startswith('app.application_id='): lines.append('app.application_id=com.brad.basscrib7')
+     elif line.startswith('app.orientation='): lines.append('app.orientation=portrait')
+-    elif line.startswith('app.version_code='): lines.append('app.version_code=53')
+-    elif line.startswith('app.version_name='): lines.append('app.version_name=0.5.0-ai-alpha5')
++    elif line.startswith('app.version_code='): lines.append('app.version_code=54')
++    elif line.startswith('app.version_name='): lines.append('app.version_name=0.5.0-ai-alpha6')
+     else: lines.append(line)
+ p.write_text('\n'.join(lines)+'\n')
+ 
+ p=root/'app/build.gradle'
+ s=p.read_text()
+-s=s.replace("abiFilters 'armeabi-v7a', 'arm64-v88a', 'x86_64'", "abiFilters 'arm64-v8a'")
++s=s.replace("abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86_64'", f"abiFilters '{abi}'")
+ needle='    packagingOptions {'
+ if "noCompress 'love'" not in s:
+     s=s.replace(needle, "    androidResources {\n        noCompress 'love'\n    }\n\n"+needle)
+ p.write_text(s)
+ PY
+ 
+-echo "[7/8] Building ARM64 APK..."
++echo "[7/8] Building $ABI APK..."
+ (
+   cd "$LOVE"
+   ./gradlew --no-daemon assembleEmbedNoRecordDebug
+@@ -100,12 +103,12 @@
+ APK="$(find "$LOVE/app/build/outputs/apk" -type f -name '*embed*noRecord*debug*.apk' | head -1)"
+ [[ -n "$APK" && -f "$APK" ]] || { echo "APK output not found" >&2; exit 2; }
+ mkdir -p "$ROOT/dist"
+-cp "$APK" "$ROOT/dist/Basscribe-v0.5.0-ai-alpha5-arm64.apk"
++cp "$APK" "$ROOT/dist/Basscribe-v0.5.0-ai-alpha6-${OUT_ABI}.apk"
+ 
+ echo "[8/8] Verifying neural payload..."
+-unzip -l "$ROOT/dist/Basscribe-v0.5.0-ai-alpha5-arm64.apk" | grep -E 'libbasscribe_ai.so|libonnxruntime.so|game.love'
++unzip -l "$ROOT/dist/Basscribe-v0.5.0-ai-alpha6-${OUT_ABI}.apk" | grep -E 'libbasscribe_ai.so|libonnxruntime.so|game.love'
+ # Verify the inner game archive really contains both models and the new Lua bridge.
+-unzip -p "$ROOT/dist/Basscribe-v0.5.0-ai-alpha5-arm64.apk" assets/game.love > "$BUILD/verify-game.love"
++unzip -p "$ROOT/dist/Basscribe-v0.5.0-ai-alpha6-${OUT_ABI}.apk" assets/game.love > "$BUILD/verify-game.love"
+ unzip -l "$BUILD/verify-game.love" | grep -E 'models/htdemucs_ft_bass_fp16weights.onnx|models/basic_pitch_nmp.onnx|main.lua'
+ 
+-echo "Built: $ROOT/dist/Basscribe-v0.5.0-ai-alpha5-arm64.apk"
++echo "Built: $ROOT/dist/Basscribe-v0.5.0-ai-alpha6-${OUT_ABI}.apk"
