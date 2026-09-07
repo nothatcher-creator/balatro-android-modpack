@@ -1,0 +1,13 @@
+--- game/main.lua
++++ game/main.lua
+@@ -338,8 +338,8 @@
+                 if hasMidPosition and p.fret>0 and p.fret<5 then
+                     base = base + 1.45 + (5-p.fret)*0.22
+                 end
+-                if hasMidPosition and targetFret>=8 and p.fret==5 then
+-                    base = base + 0.50
++                if hasMidPosition and targetFret>=7 and p.fret==5 then
++                    base = base + 2.00
+                 end
+                 if p.fret == 0 then base = base + 0.95 end
+                 if p.fret > 12 then base = base + (p.fret-12)*0.30 + 0.85 end
