@@ -49,11 +49,12 @@ jobs:
           sed 's/arm64-v88a/arm64-v8a/' "$GITHUB_WORKSPACE/basscribe-ci/alpha6-runtime.patch" > /tmp/alpha6-runtime.patch
           echo '57964f38b4305302861df8f6f5cc1b5c654a496fcb9028391b004bfc34ea1230  /tmp/alpha6-runtime.patch' | sha256sum -c -
           patch -p0 < /tmp/alpha6-runtime.patch
+          patch -p0 < "$GITHUB_WORKSPACE/basscribe-ci/alpha6-support/fingering-fix.patch"
           cp "$GITHUB_WORKSPACE/basscribe-ci/alpha6-support/pitch_periodicity.h" native/pitch_periodicity.h
           mkdir -p tests
           cp "$GITHUB_WORKSPACE/basscribe-ci/alpha6-support/test_fingering.lua" tests/test_fingering.lua
           cp "$GITHUB_WORKSPACE/basscribe-ci/alpha6-support/generate_qa_fixture.py" tests/generate_qa_fixture.py
-          echo '171a981299873372fa166d1fefdb4a80bfa311c016168d0d9db6c219d4320430  game/main.lua' | sha256sum -c -
+          echo '0e2fc19347924eb9288b8982f15693e08e65c284c97be1d1dea0e1402de35113  game/main.lua' | sha256sum -c -
           echo '98d59952f64a3eb33318b3234039f68979c87b941c6e86c849d86a7e90c0a801  native/basscribe_ai.cpp' | sha256sum -c -
           echo '26dc3c764c1fd4bb4aa245dcae08d5b738ca74814d184c0758a683b95cd8dc54  native/pitch_periodicity.h' | sha256sum -c -
           echo 'f867daed945de1a27ca04f3e99036ec04b149238e47a615760d72417945ed0a5  build_android.sh' | sha256sum -c -
@@ -63,6 +64,7 @@ jobs:
           assert 'local VERSION = "0.5.0-ai-alpha6"' in main
           assert 'onset=clamp(tonumber(on) or 0,0,1)' in main
           assert 'targetFret' in main and 'math.abs(p.fret-targetFret)' in main
+          assert 'targetFret>=7 and p.fret==5' in main and 'base = base + 2.00' in main
           assert 'displaySlot' in main and 'local fine=beat/12' in main
           assert 'love.graphics.print("/",pt.x-16' not in main
           assert 'love.graphics.print(label,pt.x-4' not in main
@@ -126,6 +128,7 @@ jobs:
           unzip -p /tmp/game.love main.lua > /tmp/main.lua
           grep -F 'local VERSION = "0.5.0-ai-alpha6"' /tmp/main.lua
           grep -F 'local fine=beat/12' /tmp/main.lua
+          grep -F 'targetFret>=7 and p.fret==5' /tmp/main.lua
           grep -F 'BASSCRIBE_RESULT version=%s' /tmp/main.lua
           ! grep -F 'love.graphics.print("/",pt.x-16' /tmp/main.lua
           unzip -p "$APK" lib/arm64-v8a/libbasscribe_ai.so > /tmp/libbasscribe_ai.so
