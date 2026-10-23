@@ -1,5 +1,13 @@
 # Balatro Android Modpack
 
+## Release 5678: v124 card-area lifecycle hotfix
+
+The October 23, 2026 update targets the reported Steamodded `handle_card_limit` crash when an edition change reaches a removed card area whose `cards` list is already gone. It preserves live-area slot calculation and the existing Negative-edition fixes, and refreshes the patched Steamodded files on existing Android installs.
+
+Download `balatro-v0.10.38-v124-card-area-lifecycle-hotfix.apk` from [release 5678](https://github.com/nothatcher-creator/balatro-android-modpack/releases/tag/5678). Install it over the existing app to retain app data; do not uninstall first. The old v123 asset remains available for reference. See [the hotfix record](docs/release-5678-v124.md) for provenance, rebuild commands, and validation limits. The Android version code is **74**, and the version name is **0.10.38**.
+
+The sections below describe the historical August 12 snapshot. Its mod list and hashes are retained as historical metadata, rather than presented as the complete release 5678 inventory.
+
 Android compatibility tooling and documentation for Brad's Balatro modpack snapshot recovered from the final tested Android build on **August 12, 2026**.
 
 This build was made on top of **mininxd/balatromod**, a Balatro mobile modpack base, and then extended with additional Steamodded mods and Android compatibility fixes.

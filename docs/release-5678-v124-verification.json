@@ -1,0 +1,29 @@
+{
+  "baseline_sha256": "d55e5d8bb25763994afaa60818cfd302428aeb68a28423c686038aa981cd4040",
+  "output_sha256": "061ea87b72b3ae0c4251d6dd8db0316ac62b85cd33b51296ca5e9e303ed94ec4",
+  "output_size_bytes": 152858377,
+  "version_code": 74,
+  "version_name": "0.10.38",
+  "materializer_version": "2026-10-23-materialized-v124-card-area-lifecycle-hotfix",
+  "unchanged_payload_entries": 2617,
+  "changed_or_added_payloads": {
+    "AndroidManifest.xml": "9d711365fc3faa6f241df488a7ee4a8a60ed766120883fbc0b141481465aa68c",
+    "assets/bundled_mods/AndroidCompatV124/Steamodded/src/overrides.lua": "f7b184014d73ac3461c9249d4ad9c7bab7f015e94ec9ab5007b0e3cabfa50dbc",
+    "assets/bundled_mods/AndroidCompatV124/Steamodded/src/utils.lua": "3d3a29a4ef4776642e3cfc72ee7db04bde96872557f3ca0cd84a4c86fe298e3a",
+    "assets/bundled_mods_bootstrap.lua": "e0d0eb3dccd7f910552b5cbd98f2c5e9d95af77e20698179eaa6d38fe316e8d1",
+    "assets/smods_mods/Steamodded/src/overrides.lua": "f7b184014d73ac3461c9249d4ad9c7bab7f015e94ec9ab5007b0e3cabfa50dbc",
+    "assets/smods_mods/Steamodded/src/utils.lua": "3d3a29a4ef4776642e3cfc72ee7db04bde96872557f3ca0cd84a4c86fe298e3a"
+  },
+  "artifact_name": "balatro-v0.10.38-v124-card-area-lifecycle-hotfix.apk",
+  "checks": {
+    "complete_changed_lua_files_compile": true,
+    "zip_integrity_and_alignment_verified": true,
+    "apksigner_v1_verified": true,
+    "apksigner_v2_verified": true,
+    "same_signing_certificate_as_baseline": true,
+    "aapt_non_version_badging_unchanged": true,
+    "android_device_playtested": false,
+    "focused_regression_tests_passed": 31
+  },
+  "signing_certificate_sha256": "a40da80a59d170caa950cf15c18c454d47a39b26989d8b640ecd745ba71bf5dc"
+}
