@@ -53,6 +53,8 @@ The manifest helper exposes `read_manifest_version(data)` and `patch_manifest(da
 
 Use Android's official `zipalign` before `apksigner`, with the certificate/key matching the baseline. After signing, verify the signature and certificate, ZIP alignment and integrity, package/version metadata, and the uncompressed bytes of every unrelated entry. Do not modify the signed APK afterward. Signing tools and key material remain outside Git.
 
+The manual [release workflow](../.github/workflows/release-5678-hotfix.yml) performs the same rebuild and checks on GitHub. It verifies downloaded tools and the baseline, runs the regressions, and requires the exact reviewed unsigned, aligned, and signed hashes before publishing. Its `publish` input defaults to false. An explicitly dispatched publishing run uses GitHub's temporary release token and preserves the previous asset and tag.
+
 ## Validation scope
 
 All **31 focused tests passed**. The signed APK verifies with v1 and v2 signatures and the original certificate, passes ZIP integrity/alignment checks, and has **2,617 unrelated payload entries byte-for-byte unchanged**. Android `aapt` reports identical non-version metadata. Complete changed Lua files compile with LuaJIT. See [the machine-readable verification record](release-5678-v124-verification.json).

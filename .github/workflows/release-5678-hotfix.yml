@@ -1,0 +1,111 @@
+name: Build and publish release 5678 hotfix
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Upload the verified v124 APK and update existing release 5678
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-5678-hotfix
+  cancel-in-progress: false
+
+jobs:
+  hotfix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Fetch verified baseline and Android tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build .tmp/android-tools
+          curl --fail --location --retry 3 --output build/release-5678.apk https://github.com/nothatcher-creator/balatro-android-modpack/releases/download/5678/balatro-v0.10.37-v123-negative-integrity-hotfix.apk
+          curl --fail --location --retry 3 --output .tmp/build-tools.zip https://dl.google.com/android/repository/build-tools_r35_linux.zip
+          echo 'bd3a4966912eb8b30ed0d00b0cda6b6543b949d5ffe00bea54c04c81e1561d88  .tmp/build-tools.zip' | sha256sum -c -
+          unzip -q .tmp/build-tools.zip -d .tmp/android-tools
+          # Public AOSP test fixtures: the baseline already uses this certificate.
+          # No repository secret or user credential is downloaded or printed.
+          curl --fail --location --retry 3 'https://android.googlesource.com/platform/build/+/refs/heads/main/target/product/security/testkey.pk8?format=TEXT' | base64 --decode > .tmp/testkey.pk8
+          curl --fail --location --retry 3 'https://android.googlesource.com/platform/build/+/refs/heads/main/target/product/security/testkey.x509.pem?format=TEXT' | base64 --decode > .tmp/testkey.x509.pem
+          echo '495675d32e89a149d5abe191f4e9c0e218b9068714e9b53a7c91e164a0741a23  .tmp/testkey.pk8' | sha256sum -c -
+          echo 'a4384ba815b9499a5ce349b4e33c1755278873fe2eac150a068823f526e6dbde  .tmp/testkey.x509.pem' | sha256sum -c -
+      - name: Rebuild and run regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install 'lupa==2.8'
+          python scripts/rebuild_5678.py --input build/release-5678.apk --output build/patched-unsigned.apk
+          echo '6e8ebc6f7677ae1b78677bd2b357f8be669b825fa53b03f19dc8efe81ba96cfd  build/patched-unsigned.apk' | sha256sum -c -
+          BALATRO_TEST_APK=build/patched-unsigned.apk BALATRO_MANIFEST_TEST_APK=build/release-5678.apk AAPT=.tmp/android-tools/android-15/aapt python -m unittest discover -s tests -v
+          python - <<'PY'
+          import zipfile
+          from lupa.luajit21 import LuaRuntime
+          compile_lua = LuaRuntime().eval('function(s,n) local f,e=loadstring(s,n); assert(f,e); return true end')
+          with zipfile.ZipFile('build/patched-unsigned.apk') as apk:
+              for name in ('assets/smods_mods/Steamodded/src/utils.lua', 'assets/smods_mods/Steamodded/src/overrides.lua', 'assets/bundled_mods_bootstrap.lua'):
+                  assert compile_lua(apk.read(name).decode(), '@'+name)
+          PY
+      - name: Align, sign, and verify exact artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk=build/balatro-v0.10.38-v124-card-area-lifecycle-hotfix.apk
+          tools=.tmp/android-tools/android-15
+          "$tools/zipalign" -f 4 build/patched-unsigned.apk build/patched-aligned.apk
+          echo '363bafc73ec0cd390322eb409cdc269093af5df6df83a5cef9f00b2874803bb6  build/patched-aligned.apk' | sha256sum -c -
+          "$tools/apksigner" sign --key .tmp/testkey.pk8 --cert .tmp/testkey.x509.pem --min-sdk-version 23 --v1-signer-name TESTKEY --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled false --v4-signing-enabled false --out "$apk" build/patched-aligned.apk
+          "$tools/apksigner" verify --verbose --print-certs "$apk" > build/signature-verification.txt
+          cat build/signature-verification.txt
+          "$tools/zipalign" -c 4 "$apk"
+          "$tools/aapt" dump badging "$apk" > build/aapt-badging.txt
+          python scripts/rebuild_5678.py --input build/release-5678.apk --verify "$apk" --report build/payload-verification.json
+          python - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          record = json.loads(Path('modpack-manifest.json').read_text())['current_release']
+          apk = Path('build') / record['apk_name']
+          with apk.open('rb') as handle:
+              digest = hashlib.file_digest(handle, 'sha256').hexdigest()
+          print('Final artifact SHA-256:', digest)
+          assert digest == record['apk_sha256'], 'Rebuild differs from independently reviewed artifact; do not publish'
+          assert apk.stat().st_size == record['apk_size_bytes']
+          signatures = Path('build/signature-verification.txt').read_text()
+          assert 'Number of signers: 1' in signatures
+          assert 'Signer #1 certificate SHA-256 digest: ' + record['signing_certificate_sha256'] in signatures
+          assert 'Verified using v1 scheme (JAR signing): true' in signatures
+          assert 'Verified using v2 scheme (APK Signature Scheme v2): true' in signatures
+          apk.with_suffix('.apk.sha256').write_text(digest + '  ' + apk.name + '\n')
+          PY
+      - name: Preserve build and verification artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-5678-v124-build
+          path: |
+            build/balatro-v0.10.38-v124-card-area-lifecycle-hotfix.apk
+            build/balatro-v0.10.38-v124-card-area-lifecycle-hotfix.apk.sha256
+            build/signature-verification.txt
+            build/aapt-badging.txt
+            build/payload-verification.json
+          retention-days: 7
+      - name: Publish to existing release
+        if: ${{ inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release upload 5678 build/balatro-v0.10.38-v124-card-area-lifecycle-hotfix.apk build/balatro-v0.10.38-v124-card-area-lifecycle-hotfix.apk.sha256
+          gh release edit 5678 --title 'Balatromod — v124 card-area crash hotfix' --notes-file docs/release-5678-v124-notes.md
